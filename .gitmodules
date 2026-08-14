@@ -1,0 +1,3 @@
+[submodule "go2_mjcf"]
+	path = go2_mjcf
+	url = git@github.com:AntonioLAvila/go2_mjcf.git
