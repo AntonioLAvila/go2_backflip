@@ -5,14 +5,30 @@ need per-leg IK to stay consistent, and the solver does not need the help. Phase
 whole robot rigidly about the rear foothold, which keeps the rear feet planted and lifts the
 front pair for free, while the rear legs extend into the launch. Phase 2 is a ballistic base
 with a linear pitch ramp to -2*pi and a tuck in the middle. Phase 3 holds the landing pose.
+
+Phases 1 and 2 additionally get a single-shooting pass (see _simulate): the q(t) above is a
+hand-authored kinematic path, so the u/lambda that _wrench solves for only balances the
+manipulator equation pointwise, per knot -- integrating the true dynamics forward from one
+knot rarely lands on the next one's prescribed state (worst during flight, where nothing in
+the kinematic path enforces conservation of momentum as the legs tuck). Re-simulating with
+that same u/lambda as an open-loop applied_generalized_force input -- the exact port
+DirectCollocation itself uses -- replaces q(t)/v(t) with something that satisfies the real
+dynamics exactly, by construction. Confirmed this matters: on the shrunk (14-knot flight) test
+problem, IPOPT's best unscaled constraint violation went from 31.5-36.5 (kinematic-only guess)
+to 5.7 (this guess), though it still doesn't converge -- see STATUS.md.
 """
 
 from __future__ import annotations
 
 import numpy as np
 from pydrake.multibody.tree import JacobianWrtVariable, MultibodyForces
+from pydrake.systems.analysis import Simulator
+from pydrake.systems.framework import DiagramBuilder
+from pydrake.systems.primitives import ConstantVectorSource, TrajectorySource
+from pydrake.trajectories import PiecewisePolynomial
 
 import go2_constants as K
+from program import make_plant
 from schedule import PHASES
 
 G = 9.81
@@ -135,12 +151,15 @@ class Guess:
         stand = self.place(0.0, legs(HOME_LEG, HOME_LEG), pivot, target)
         Q = self.positions()
         out = []
+        q1_end = v1_end = None
         for p, ph in enumerate(PHASES):
             t = np.linspace(0, DURATION[p], ph.n_knots)
             if p == 1:
                 q, v, vdot = self._fine_kinematics(self._launch_path, ph.n_knots, DURATION[p])
             elif p == 2:
-                z0, x0 = Q[1][-1][6], Q[1][-1][4]
+                # Chain from launch's SIMULATED end (below), not its kinematic one -- real
+                # dynamics won't land exactly where the rigid-pivot formula assumed.
+                z0, x0 = q1_end[6], q1_end[4]
                 vz = (K.STAND_BASE_HEIGHT - z0 + 0.5 * G * DURATION[2] ** 2) / DURATION[2]
                 path_fn = lambda s: self._flight_path(s, z0, x0, vz, DURATION[2])
                 q, v, vdot = self._fine_kinematics(path_fn, ph.n_knots, DURATION[p])
@@ -169,8 +188,55 @@ class Guess:
 
             gen = np.array([self._gen_force(q[k], u[k], ph.contacts, lam[k])
                             for k in range(ph.n_knots)])
+
+            # Launch and flight: q(t)/v(t) above came from a HAND-AUTHORED kinematic path, so
+            # vdot (and the u/lam it implies) only balances the manipulator equation pointwise,
+            # per knot -- integrating the actual dynamics forward from knot k rarely lands on
+            # knot k+1's prescribed state, which is exactly the "dynamics residual" this guess
+            # was flagged for. Re-simulate with the SAME applied_generalized_force = B u + J^T
+            # lambda DirectCollocation itself uses, driven open-loop by the gen(t) just chosen
+            # above (first-order-hold, matching the transcription's own approximation) -- the
+            # result satisfies the true dynamics exactly by construction. u/lam are kept as
+            # computed; only the resulting q, v are replaced.
+            if p == 1:
+                q, v = self._simulate(q[0], v[0], t, gen)
+                q1_end, v1_end = q[-1], v[-1]
+            elif p == 2:
+                # Chain z0/x0 (position) from launch's simulated end above, but start the
+                # simulation from THIS phase's own self-consistent kinematic v[0] -- gen/u
+                # were derived against that v(t), not launch's actual v1_end (nothing in this
+                # guess enforces velocity continuity across phase seams, same as the
+                # pre-existing load->launch seam). Simulating from a velocity gen wasn't tuned
+                # for is what caused the divergence this fix is trying to remove in the first
+                # place.
+                q, v = self._simulate(q[0], v[0], t, gen)
+
             out.append(dict(t=t, x=np.hstack([q, v]), u=u, lam=lam, gen=gen))
         return out
+
+    def _simulate(self, q0, v0, t, gen):
+        """Forward-integrate from (q0, v0) driven open-loop by gen(t), first-order-held."""
+        builder = DiagramBuilder()
+        plant = builder.AddSystem(make_plant())
+        src = builder.AddSystem(TrajectorySource(PiecewisePolynomial.FirstOrderHold(t, gen.T)))
+        zero = builder.AddSystem(ConstantVectorSource(np.zeros(12)))
+        builder.Connect(src.get_output_port(), plant.GetInputPort("applied_generalized_force"))
+        builder.Connect(zero.get_output_port(), plant.get_actuation_input_port())
+        diagram = builder.Build()
+
+        sim = Simulator(diagram)
+        sim.get_mutable_integrator().set_target_accuracy(1e-9)
+        ctx = plant.GetMyMutableContextFromRoot(sim.get_mutable_context())
+        plant.SetPositions(ctx, q0)
+        plant.SetVelocities(ctx, v0)
+        sim.Initialize()
+
+        q_out, v_out = [q0.copy()], [v0.copy()]
+        for tk in t[1:]:
+            sim.AdvanceTo(tk)
+            q_out.append(plant.GetPositions(ctx).copy())
+            v_out.append(plant.GetVelocities(ctx).copy())
+        return np.array(q_out), np.array(v_out)
 
     def _map_qdot(self, q, qd):
         self.plant.SetPositions(self.ctx, q)

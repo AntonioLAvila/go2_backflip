@@ -1,7 +1,8 @@
 # Backflip trajectory optimization — status
 
-Last updated 2026-08-20. Not yet converged. This is a resumption point, not a
-finished pipeline.
+Last updated 2026-08-22. Not yet converged. This is a resumption point, not a
+finished pipeline. Best result to date: IPOPT, unscaled constraint violation
+**5.7** on the shrunk (14-knot flight) problem — see the 2026-08-22 section.
 
 > **2026-08-20 note:** everything in this repo (`tools/`, `traj_opt/`, this
 > file, and the `go2_mjcf` submodule fix) is now committed and pushed,
@@ -49,15 +50,63 @@ to auto-tag each binding by call site (function:line) purely for readable
 grouping, builds the guess the same way `solve_backflip.py` does, and reports
 nullity plus which call sites dominate it.
 
-**Not yet done:** re-solve with this fix in place. The shrunk-problem SNOPT/
-IPOPT attempts in the table below all predate it — none of those numbers
-reflect the current `program.py`. This is the next thing to try, and there's
-real reason to expect it matters: SNOPT is LICQ-sensitive by construction
-(that's the entire reason bugs 1-3 were all found via SNOPT's silent
-`info=13` while IPOPT threw explicit errors), and SNOPT has literally never
-been tried on a `program.py` with all three bugs fixed. Try SNOPT again first,
-on the shrunk (14-knot flight) problem for speed, before going back to IPOPT
-tuning (steps 3-4 below).
+## 2026-08-22 session: single-shooting the launch/flight guess
+
+**Retried both solvers with bug 3 fixed** (still the shrunk 14-knot-flight
+problem): SNOPT `info=13` then `info=43`, cost 5.09 on the optimal pass (real
+progress vs. the ~24-29 cost pre-fix, but still not success) and a much longer
+feasibility pass (1695s vs ~130-200s before). IPOPT: max-iter exceeded,
+unscaled constraint violation 36.5 — same order as before the fix, and the
+same "dips low, then wanders" pattern under closer inspection (`inf_pr`
+oscillates through the 7-90 range across the run, not a clean dip-then-rise).
+Bug 3 was real and worth fixing (it's what the nullity check demanded), but
+it did not change either solver's qualitative failure mode. **Ruled out the
+linear solver lever too**: this Drake IPOPT build only actually supports
+`spral` (confirmed by trying to set `linear_solver=ma57` — Drake's own error
+message lists `spral`/`custom` as the only valid settings, despite `strings`
+on `libdrake.so` turning up `ma27`/`ma57`/etc. as recognized-but-unlinked
+option names). Step 3 below is closed, not just deprioritized.
+
+**What actually moved the needle: single-shooting launch/flight (step 4).**
+Every attempt's very first solve is an unweighted, zero-cost feasibility
+pass — and it had never once succeeded, at up to 800-3000 iterations, across
+every combination of bug fixes and solver tried. That rules out a cost/
+feasibility tradeoff and points at the guess itself not being dynamically
+close enough to reach. Implemented in `guess.py`: after the existing
+kinematic path produces a `u(t)`/`lambda(t)` choice per knot (unchanged),
+launch and flight are now **re-simulated** forward from their start state
+using that same `u`/`lambda` fed through the identical
+`applied_generalized_force` port DirectCollocation itself uses — the result
+satisfies the true dynamics exactly, by construction, rather than only
+balancing the manipulator equation pointwise per knot. (One bug on the way:
+chaining flight's simulation from launch's actual ending *velocity* while
+`u(t)` had been derived assuming a different, self-consistent velocity from
+flight's own kinematic path caused the two to fight and the whole trajectory
+to blow up — z fell to -0.5 m, x to -1.4 m. Fixed by chaining position only
+(via z0/x0) and simulating from flight's own self-consistent `v(0)`, matching
+what `u(t)` was actually derived against.)
+
+Result: nullity actually improved slightly (16 → 12), and IPOPT's best
+unscaled constraint violation dropped **36.5 → 5.7** (800 iters) — a ~6x
+improvement, with the last ~30 iterations of that run monotonically
+decreasing (13.4 → 5.7), unlike every prior attempt's noise. Tried 3000
+iterations expecting it to keep converging: it didn't — ended at 8.6, and the
+trajectory in the 2900-3000 range oscillates in a 6-13 band with no net
+progress. So the guess fix gave a real, one-time improvement in the best
+reachable quality, but more IPOPT iterations alone don't close the remaining
+gap; it circles a region instead of converging into it.
+
+Tried SNOPT with this same new guess, expecting a proper SQP step might
+handle the near-feasible region differently than IPOPT's L-BFGS: it didn't —
+`info=44` on feasibility (594.7s, a code not seen before in this project),
+then `info=13` with cost **51.5** on the optimal pass, markedly *worse* than
+the 5.09 SNOPT got from the *old* kinematic-only guess. So the new guess
+helps IPOPT and hurts SNOPT — plausibly because the simulated trajectory's
+larger velocities (flight `|v|` up to 16 rad/s or m/s, vs a much gentler
+kinematic profile) make for a worse-conditioned linearization point for an
+active-set method, even though it's a strictly more dynamically-accurate
+point. **Best result to date, across both sessions: IPOPT + the new guess,
+unscaled constraint violation 5.7, still not converged.**
 
 ## What's real and confirmed
 
@@ -155,39 +204,59 @@ attempts across two sessions:
 | shrunk (prior session) | IPOPT | 14, loose tol | 800 iters, unscaled constraint violation **31.5** — *worse*, not better |
 | shrunk, bugs 1+2 only | SNOPT | 14, loose tol | `info=13` (127.7s) then `info=13` (706.0s) — infeasible |
 | shrunk, bugs 1+2 only, earlier run | SNOPT | 14, loose tol | `info=13` (208.1s) then `info=43` (1289.4s) — infeasible |
+| bugs 1-3 fixed, old guess | SNOPT | 14, loose tol | `info=13` then `info=13`, cost 5.09 (2078s) — infeasible, but real progress |
+| bugs 1-3 fixed, old guess | IPOPT | 14, loose tol | 800 iters, unscaled constraint violation 36.5 — same oscillating pattern as before |
+| bugs 1-3 fixed, **new (single-shot) guess** | IPOPT | 14, loose tol | 800 iters, unscaled constraint violation **5.7** — best result yet |
+| bugs 1-3 fixed, new guess, more iters | IPOPT | 14, loose tol | 3000 iters, unscaled constraint violation 8.6 — *worse*, oscillates 6-13 with no net progress |
+| bugs 1-3 fixed, new guess | SNOPT | 14, loose tol | `info=44` (594.7s) then `info=13`, cost 51.5 (2064s) — *worse* than SNOPT's old-guess result |
 
-The shrink experiment gave a **negative result worth remembering**: IPOPT on
-the smaller/coarser flight discretization got promisingly close early
-(`inf_pr` down to ~8–14 by iteration 20–30) then **diverged away from that**,
-ending up markedly worse (constraint violation 31.5) than the full-size run's
-0.068 — not "scale was the whole problem." And both SNOPT runs on this same
-shrunk problem came back infeasible, which is what triggered the bug 3
-diagnosis above (same `info=13` signature bugs 1 and 2 were originally found
-through). **Nothing in this table reflects bug 3's fix yet** — every row here
-predates it.
+The shrink experiment gave a **negative result worth remembering** (IPOPT
+diverging from a promising start on the pre-bug-3 formulation) that in
+hindsight was really bug 3 showing up on a different problem size. With bugs
+1-3 all fixed, the real remaining bottleneck showed up cleanly: every
+attempt's first solve is an unweighted, zero-cost feasibility pass, and it
+had never once succeeded — at up to 3000 iterations, on either solver, before
+*or* after the guess fix below. That rules out a cost-vs-feasibility
+tradeoff and points at guess quality/optimizer capability as the remaining
+gap, not the constraint formulation.
+
+**Single-shooting launch/flight (`guess.py`, see its module docstring) is a
+real, confirmed improvement for IPOPT** (36.5 → 5.7, ~6x) but doesn't fully
+close the gap, and *hurts* SNOPT (5.09 → 51.5) — plausibly because the
+simulated trajectory's larger, more realistic velocities make for a worse
+linearization point for an active-set method even though they're more
+dynamically accurate. **Best result to date: IPOPT + the new guess, unscaled
+constraint violation 5.7, not converged.** More IPOPT iterations alone don't
+help (3000 iters gave 8.6, oscillating) — the bottleneck now looks like
+genuine optimizer capability (limited-memory BFGS curvature quality) rather
+than formulation or guess quality.
+
+**Ruled out, not just deprioritized:** IPOPT's linear solver. This Drake
+build only actually has `spral` linked — confirmed by trying to set
+`linear_solver=ma57` directly; Drake's own error lists `spral`/`custom` as
+the only valid settings, despite `ma27`/`ma57`/etc. appearing as recognized
+option-name strings in `libdrake.so`.
 
 ## Concrete next steps, in order of expected payoff
 
-1. **Retry SNOPT on the shrunk (14-knot flight) problem with bug 3 fixed.**
-   `PYTHONPATH=... .venv/bin/python traj_opt/solve_backflip.py --solver snopt
-   --iters 800 --feas-tol 1e-4 --opt-tol 1e-2`. SNOPT has never been run
-   against a `program.py` with all three LICQ bugs fixed — every prior SNOPT
-   attempt still had at least one of them live. Fast (~15-25 min), and this
-   time there's a real mechanism-level reason to expect a different result,
-   not just a re-roll.
-2. Run `traj_opt/nullity_check.py` again first if `program.py` changes at all
-   before that — cheap (~1 min), and it's what found bugs 1-3.
-3. **If SNOPT still fails, try IPOPT on the bug-3-fixed shrunk problem** before
-   concluding SNOPT just doesn't suit this problem — the 31.5 constraint
-   violation in the table above was measured on a formulation with a real
-   LICQ defect, so it isn't a clean read on IPOPT either.
-4. **If both solvers do better on the small problem, grow it back up**
-   (16→20→26 flight knots), warm-starting each size from the previous solve.
-5. **Check IPOPT's linear solver** (`spral`, Drake's vendored default; MA27/
-   MA57 usually more robust if available) and **reconsider the `launch`/
-   `flight` guess** (single-shooting instead of the analytic kinematic path)
-   — both still apply if 1-4 don't fully resolve it, per the previous
-   session's reasoning.
+1. **Grow the flight phase's knot count back up** (14→20→26), warm-starting
+   each size from the 5.7-violation IPOPT solution above (`bp.prog.
+   SetInitialGuess` from a saved `result`, not from `guess.py`). More knots
+   raise the accuracy of the Hermite-Simpson defect approximation itself,
+   which might matter now that the guess/formulation bottlenecks are cleared
+   — not yet tried at any size with the new guess.
+2. **Try warm-starting a second solve from the first's near-feasible
+   result**, rather than a single long run — IPOPT resets its own barrier
+   parameter on a fresh `Solve()` call, which sometimes escapes an
+   oscillating regime a single continuous run can't. Cheap to test (just
+   chain two `solve()` calls in `solve_backflip.py` instead of one 3000-iter
+   call).
+3. **Extend single-shooting to `load`/`absorb`** for full internal
+   consistency, though these are currently static holds and already provably
+   exact fixed points of their own equilibrium `u`/`lambda` — expected low
+   payoff, do this only after 1-2.
+4. Run `traj_opt/nullity_check.py` again after any further `program.py` or
+   `guess.py` change — cheap (~1 min), and it's what found bugs 1-3.
 
 ## Files
 
@@ -197,9 +266,9 @@ predates it.
 | `tools/check_envelope.py` | unit check for the linear torque-speed envelope | done, passes |
 | `tools/tuck_box.py` | self-collision-free sagittal joint box (flight only) | done |
 | `traj_opt/schedule.py` | phase table — flight currently **14 knots** (shrunk for the diagnostic above, not yet grown back) | — |
-| `traj_opt/program.py` | the NLP: constraints, all three fixed bugs live here | builds cleanly, nullity 16/3680 (was 335), not yet solved |
+| `traj_opt/program.py` | the NLP: constraints, all three fixed bugs live here | builds cleanly, nullity 12/3680 (was 335), not yet solved |
 | `traj_opt/nullity_check.py` | FD-Jacobian/SVD LICQ diagnostic — found bugs 1-3 | done, rerun after any constraint-family change |
-| `traj_opt/guess.py` | analytic initial guess | done, all known inconsistencies fixed |
+| `traj_opt/guess.py` | analytic initial guess, now single-shooting launch/flight | done, best IPOPT result yet (violation 5.7) |
 | `traj_opt/solve_backflip.py` | CLI, supports `--solver ipopt\|snopt`, `--feas-tol`, `--opt-tol` | runs, doesn't converge yet |
 | `traj_opt/audit.py` | post-solve physics audit | untested end-to-end (never reached, no solve has succeeded) |
 | `traj_opt/replay.py`, `traj_opt/mj_divergence.py` | meshcat playback, MuJoCo open-loop divergence (TODO-10) | untested end-to-end, same reason |
