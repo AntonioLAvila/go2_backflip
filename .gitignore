@@ -1,3 +1,4 @@
 .venv
 .vscode
 */__pycache__
+traj_opt/out/

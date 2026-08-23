@@ -1,8 +1,12 @@
 # Backflip trajectory optimization — status
 
-Last updated 2026-08-22. Not yet converged. This is a resumption point, not a
-finished pipeline. Best result to date: IPOPT, unscaled constraint violation
-**5.7** on the shrunk (14-knot flight) problem — see the 2026-08-22 section.
+Last updated 2026-08-22. Not yet converged (`is_success()==False`). This is a
+resumption point, not a finished pipeline. Best result to date: IPOPT,
+unscaled constraint violation **0.0308** on the shrunk (14-knot flight)
+problem, found via restart-from-checkpoint (not a single continuous solve) —
+see "restarting from checkpoints is the real lever" below. Near-exact net
+rotation and clean contact forces; real remaining gaps in flight momentum
+conservation and integration accuracy that point at more flight knots.
 
 > **2026-08-20 note:** everything in this repo (`tools/`, `traj_opt/`, this
 > file, and the `go2_mjcf` submodule fix) is now committed and pushed,
@@ -107,6 +111,112 @@ kinematic profile) make for a worse-conditioned linearization point for an
 active-set method, even though it's a strictly more dynamically-accurate
 point. **Best result to date, across both sessions: IPOPT + the new guess,
 unscaled constraint violation 5.7, still not converged.**
+
+## 2026-08-22 session, continued: restarting from checkpoints is the real lever
+
+Ruled out `mu_strategy=adaptive` next: it genuinely changes IPOPT's early
+iterations (verified directly — a 30-iteration side-by-side shows completely
+different `inf_pr` trajectories) but converges to the *exact same* final
+result as `monotone` by iteration 800 (confirmed twice, independently). Dead
+end, not worth revisiting.
+
+**What worked:** instead of one long continuous solve, re-solve in short
+bursts (300 iterations), warm-starting each burst from the previous burst's
+raw result (not reverting to the best-seen point — reverting to an identical
+checkpoint with identical options just reproduces the identical result,
+since IPOPT is deterministic given the same start and options; confirmed by
+accident when 16 consecutive "revert to best" restarts all returned the
+exact same viol=3.603). Chaining forward through bursts, even through
+temporary regressions, explores materially different territory each burst.
+Two independent runs of this both stumbled onto excellent points:
+**unscaled constraint violation 0.055** (run 1) and **0.078** (run 2, at
+"restart 2") — both far better than anything a continuous run ever found,
+and better than the historical best (0.068, on the full 26-knot problem).
+Runs don't reproduce each other bit-for-bit despite identical code and
+starting guess, most likely because `spral` (the linear solver) is
+multi-threaded and floating-point reduction order isn't deterministic across
+threads — small numerical noise compounds over hundreds of nonlinear
+iterations into different trajectories. Restarting is therefore closer to a
+stochastic multi-start than a deterministic refinement, and needs the good
+checkpoints saved immediately or they're lost (learned the hard way — the
+0.055 result from run 1 was never saved and could not be recovered).
+
+**Chasing the run-2 checkpoint (`r2`, viol=0.078) further**: a long
+continuous solve from `r2` dipped to an even better **0.0308** partway
+through (iteration ~1764) — the best result of the entire project, over 2x
+better than the previous historical best — but then wandered back up to 2.0
+by iteration 3000. Recapturing that dip by capping `max_iter` at the right
+point reproduced it exactly (IPOPT *is* deterministic run-to-run from a
+fixed starting point and options — only different starting points or option
+changes introduce the threading noise above). Also tried a pure
+zero-cost feasibility pass from that same dip, hoping to close the last gap
+without a cost gradient fighting it: made things *worse* (0.81), same
+"wanders away" pattern. **The pattern holds everywhere: good points are
+transient under continued iteration, regardless of whether cost is present.
+The only reliable way found to capture one is to cap iterations at the
+right spot and save immediately** — there is no known way yet to make IPOPT
+run *past* one of these points without losing it.
+
+**Found and fixed a real, previously-latent bug** while trying to audit the
+0.0308 checkpoint: `solve_backflip.py:extract()` called
+`result.GetSolution(bp.lam[p])` on a 3D array of decision variables, which
+`GetSolution` doesn't support (only 1D/2D) — this would have crashed on the
+very first `is_success()==True` this project ever produced, since `main()`
+only calls `extract()` past that gate. Never triggered before because no
+solve had reached success. Fixed the same way `set_guess()` already handles
+it elsewhere: flatten to 2D for `GetSolution`, reshape back.
+
+**Reframing what "done" means here:** IPOPT's `is_success()` requires both
+primal feasibility *and* dual optimality (cost-gradient stationarity). The
+0.0308 checkpoint has excellent primal feasibility but enormous dual
+infeasibility (~1.5e6) — it is nowhere near a certified local optimum, just
+very close to a *feasible* point. Since the actual purpose of this
+trajectory is an RL-imitation reference, not a publishable optimality
+certificate, a small primal violation may already be good enough to use even
+without `is_success()==True`.
+
+**Ran the full audit against the 0.0308 checkpoint** (bypassing the
+`is_success()` gate). 1 of 6 checks pass outright, but the picture is more
+nuanced than a flat fail:
+
+- **Net rotation: -359.9993° vs a -360° target** — off by 0.0007°. The audit
+  marks this FAIL only because its tolerance is 1e-6 rad; this is, in every
+  practical sense, an exact backflip.
+- **Contact forces inside the friction cone: PASS**, cleanly (cone slack
+  1.7e-7 N).
+- **Flight CoM ballistic**: FAIL, 1.24 cm residual vs a 1 mm audit threshold
+  — plausibly just the 14-knot flight discretization being coarse, not a
+  correctness problem.
+- **Flight angular momentum conserved**: FAIL, ~11.5% drift (L_y=-4.33,
+  drift 0.499 N.m.s) — a real, if moderate, discretization artifact.
+- **Torque envelope**: FAIL, 39 N.m worst overshoot — but the audit checks
+  against `torque_speed_bound()`, the true non-smooth envelope, not
+  `torque_speed_halfplanes()`, the linear approximation actually enforced in
+  `program.py`. These two are known and *documented* to diverge in the
+  regenerating quadrant (`tools/check_envelope.py`), so at least part of
+  this "overshoot" is expected behavior, not necessarily a violated NLP
+  constraint — worth rechecking against the halfplane bound directly before
+  treating this as a real problem.
+- **Collocation matches a tight integrator**: FAIL, badly — 1.14 (q) / 8.65
+  (v) worst end-of-phase drift when a phase's reconstructed input is
+  replayed through a tight-tolerance simulator. Individual knot-level
+  collocation defects are all small (consistent with the 0.03 aggregate NLP
+  violation), but they accumulate across a phase into a much larger
+  cumulative drift — classic small-per-step / large-cumulative-error, and
+  the most likely explanation is exactly what step 1 below already
+  proposes: the flight phase's coarse 14-knot discretization.
+
+Net read: **this checkpoint gets the actual maneuver essentially right**
+(near-exact rotation, real contact forces) but is not yet something to trust
+as a hardware/RL reference — the integration-drift and momentum-conservation
+failures both point at the same fix (more flight knots), which was already
+next on the list before any of today's work.
+
+Also wrote `traj_opt/out/backflip.npz` from this checkpoint for inspection
+(747 samples @ 500 Hz) — **do not treat this as a validated trajectory**,
+it's a snapshot of a `NOT SOLVED` result with 5/6 audit failures, kept only
+for `replay.py`/`mj_divergence.py` spot-checking. `traj_opt/out/` is now
+gitignored so a file like this is never accidentally committed.
 
 ## What's real and confirmed
 
@@ -239,23 +349,34 @@ option-name strings in `libdrake.so`.
 
 ## Concrete next steps, in order of expected payoff
 
-1. **Grow the flight phase's knot count back up** (14→20→26), warm-starting
-   each size from the 5.7-violation IPOPT solution above (`bp.prog.
-   SetInitialGuess` from a saved `result`, not from `guess.py`). More knots
-   raise the accuracy of the Hermite-Simpson defect approximation itself,
-   which might matter now that the guess/formulation bottlenecks are cleared
-   — not yet tried at any size with the new guess.
-2. **Try warm-starting a second solve from the first's near-feasible
-   result**, rather than a single long run — IPOPT resets its own barrier
-   parameter on a fresh `Solve()` call, which sometimes escapes an
-   oscillating regime a single continuous run can't. Cheap to test (just
-   chain two `solve()` calls in `solve_backflip.py` instead of one 3000-iter
-   call).
-3. **Extend single-shooting to `load`/`absorb`** for full internal
+1. **Make restart-from-checkpoint a real, reusable feature of
+   `solve_backflip.py`**, not scratch scripts in `/tmp`. It's the single
+   biggest lever found in this project (5.7 → 0.0308). Needs: a loop of
+   short bursts (a few hundred iterations each) with a `max_violation()`
+   helper (already written in the scratch scripts — walks
+   `prog.GetAllConstraints()`, no need for IPOPT's own printed summary),
+   chaining forward from each burst's raw result (**not** reverting to the
+   best-seen point between bursts — reverting to an identical checkpoint
+   with identical options just reproduces the identical result, since IPOPT
+   is deterministic given the same start and options), and saving every
+   burst's decision-variable vector to disk immediately so a good point is
+   never lost the way run 1's 0.055 result was.
+2. **Grow the flight phase's knot count back up** (14→20→26), warm-starting
+   from the 0.0308 checkpoint (once saved via 1) rather than `guess.py`'s
+   analytic guess. This directly targets the audit's two real remaining
+   failures (integration drift, angular momentum conservation) — both look
+   like coarse-discretization artifacts on a checkpoint that already gets
+   the maneuver essentially right.
+3. **Re-check the torque-envelope audit failure against
+   `torque_speed_halfplanes()` directly**, not `torque_speed_bound()` — the
+   two are known to diverge in the regenerating quadrant, so some (maybe
+   all) of the reported 39 N.m overshoot may not reflect a violated NLP
+   constraint at all.
+4. **Extend single-shooting to `load`/`absorb`** for full internal
    consistency, though these are currently static holds and already provably
    exact fixed points of their own equilibrium `u`/`lambda` — expected low
    payoff, do this only after 1-2.
-4. Run `traj_opt/nullity_check.py` again after any further `program.py` or
+5. Run `traj_opt/nullity_check.py` again after any further `program.py` or
    `guess.py` change — cheap (~1 min), and it's what found bugs 1-3.
 
 ## Files
@@ -269,7 +390,7 @@ option-name strings in `libdrake.so`.
 | `traj_opt/program.py` | the NLP: constraints, all three fixed bugs live here | builds cleanly, nullity 12/3680 (was 335), not yet solved |
 | `traj_opt/nullity_check.py` | FD-Jacobian/SVD LICQ diagnostic — found bugs 1-3 | done, rerun after any constraint-family change |
 | `traj_opt/guess.py` | analytic initial guess, now single-shooting launch/flight | done, best IPOPT result yet (violation 5.7) |
-| `traj_opt/solve_backflip.py` | CLI, supports `--solver ipopt\|snopt`, `--feas-tol`, `--opt-tol` | runs, doesn't converge yet |
+| `traj_opt/solve_backflip.py` | CLI, supports `--solver ipopt\|snopt`, `--feas-tol`, `--opt-tol` | `extract()` 3D-`GetSolution` bug fixed (never triggered before, no solve had reached success); restart-from-checkpoint (next steps step 1) not yet built in, only in scratch scripts |
 | `traj_opt/audit.py` | post-solve physics audit | untested end-to-end (never reached, no solve has succeeded) |
 | `traj_opt/replay.py`, `traj_opt/mj_divergence.py` | meshcat playback, MuJoCo open-loop divergence (TODO-10) | untested end-to-end, same reason |
 

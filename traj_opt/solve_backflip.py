@@ -91,7 +91,9 @@ def extract(bp: BackflipProgram, result):
             t=t0 + ts,
             x=bp.dc[p].GetStateSamples(result).T,
             u=result.GetSolution(bp.u[p]),
-            lam=result.GetSolution(bp.lam[p]) if ph.contacts else np.zeros((ph.n_knots, 0, 3)),
+            lam=(result.GetSolution(bp.lam[p].reshape(ph.n_knots, -1))
+                 .reshape(ph.n_knots, len(ph.contacts), 3)
+                 if ph.contacts else np.zeros((ph.n_knots, 0, 3))),
             contacts=ph.contacts,
             traj=bp.dc[p].ReconstructStateTrajectory(result),
             t0=t0))
