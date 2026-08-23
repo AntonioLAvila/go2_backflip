@@ -218,6 +218,32 @@ it's a snapshot of a `NOT SOLVED` result with 5/6 audit failures, kept only
 for `replay.py`/`mj_divergence.py` spot-checking. `traj_opt/out/` is now
 gitignored so a file like this is never accidentally committed.
 
+**The restart loop is now a real, committed feature**, not scratch scripts:
+`solve_backflip.py --restarts N --burst-iters K`. After the normal
+feasibility/optimal passes, if not already solved, it re-solves in `K`-
+iteration bursts (default 300), chaining forward from each burst's raw
+result, tracking and immediately disk-saving (`traj_opt/out/checkpoints/`)
+whichever burst had the lowest `max_violation()` — a new helper that walks
+`prog.GetAllConstraints()` directly rather than parsing IPOPT's printed
+summary, so it works mid-loop and for SNOPT too. If nothing ever reaches
+`is_success()`, `main()` now still runs the full `extract`/`audit`/`resample`/
+`save` pipeline on the best checkpoint found, rather than exiting with
+nothing (matching what was done by hand above) — always prints
+`NOT SOLVED (best viol=...)` first so this is never mistaken for a real
+success.
+
+**A production run using this feature was started and left running in the
+background as this session wrapped up**: `--solver ipopt --iters 400
+--feas-tol 1e-4 --opt-tol 1e-2 --restarts 20 --burst-iters 300`, aiming to
+reproduce or beat the 0.0308 result. It is a detached background process
+(will keep running after this session ends) and writes every checkpoint to
+`traj_opt/out/checkpoints/*.npy` plus a final `traj_opt/out/backflip.npz`
+regardless of whether anyone is watching — **check those paths first** next
+session before launching anything new; the run may already have finished
+(or found something better) by then. Its console log lives in this
+session's scratchpad, which may not survive — the `traj_opt/out/` files are
+the durable record.
+
 ## What's real and confirmed
 
 **Two structural NLP bugs found and fixed**, both confirmed with a

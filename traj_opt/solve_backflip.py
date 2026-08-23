@@ -77,8 +77,55 @@ def solve(bp: BackflipProgram, options, label: str, solver: str = "ipopt"):
         result = IpoptSolver().Solve(bp.prog, bp.prog.initial_guess(), options)
         status = f"IPOPT status={result.get_solver_details().ConvertStatusToString()}"
     print(f"[{label}] success={result.is_success()} {status} "
-          f"cost={result.get_optimal_cost():.4f} in {time.time() - t0:.1f}s")
+          f"cost={result.get_optimal_cost():.4f} viol={max_violation(bp.prog, result):.4f} "
+          f"in {time.time() - t0:.1f}s")
     return result
+
+
+def max_violation(prog, result) -> float:
+    """Max infeasibility over every constraint -- the number IPOPT calls unscaled constraint
+    violation, computed directly so it can be checked mid-restart-loop, not just parsed from
+    a printed final summary."""
+    worst = 0.0
+    for b in prog.GetAllConstraints():
+        ev = b.evaluator()
+        y = ev.Eval(result.GetSolution(b.variables()))
+        lo, hi = ev.lower_bound(), ev.upper_bound()
+        worst = max(worst, float(np.maximum(np.maximum(lo - y, 0.0), y - hi).max()))
+    return worst
+
+
+def restart_loop(bp: BackflipProgram, make_opts, solver: str, feas_tol: float, opt_tol: float,
+                  burst_iters: int, n_restarts: int, result):
+    """Re-solve in short bursts, chaining forward from each burst's raw result.
+
+    Continuous runs reliably wander away from good points once reached (confirmed
+    repeatedly on this problem -- see STATUS.md); restarting resets IPOPT's own internal
+    state each burst and, empirically, finds much better points than any single long run.
+    Reverting to the best-seen point between bursts does NOT help -- IPOPT is deterministic
+    given the same start and options, so that just reproduces the same result every time.
+    Chaining forward through temporary regressions is what actually explores new territory.
+    Every burst's checkpoint is saved to disk immediately so a good point is never lost to a
+    worse one two bursts later.
+    """
+    best_result, best_viol = result, max_violation(bp.prog, result)
+    ckpt_dir = OUT.parent / "checkpoints"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    np.save(ckpt_dir / "burst_start.npy", result.GetSolution(bp.prog.decision_variables()))
+
+    for r in range(n_restarts):
+        result = solve(bp, make_opts(feas_tol, opt_tol, burst_iters), f"restart {r}", solver)
+        x = result.GetSolution(bp.prog.decision_variables())
+        np.save(ckpt_dir / f"burst_{r}.npy", x)
+        viol = max_violation(bp.prog, result)
+        if viol < best_viol:
+            best_result, best_viol = result, viol
+            np.save(ckpt_dir / "best.npy", x)
+            print(f"  new best: viol={best_viol:.4f}")
+        bp.prog.SetInitialGuess(bp.prog.decision_variables(), x)   # chain forward, always
+        if result.is_success():
+            return result
+    return best_result
 
 
 def extract(bp: BackflipProgram, result):
@@ -132,6 +179,11 @@ def main() -> int:
     ap.add_argument("--feas-tol", type=float, default=1e-6)
     ap.add_argument("--opt-tol", type=float, default=1e-3)
     ap.add_argument("--feasibility-only", action="store_true")
+    ap.add_argument("--restarts", type=int, default=0,
+                     help="extra short-burst restarts after the initial solve, chaining "
+                          "forward from each burst's result -- the single biggest lever "
+                          "found for this problem so far, see STATUS.md")
+    ap.add_argument("--burst-iters", type=int, default=300)
     args = ap.parse_args()
 
     bp = BackflipProgram()
@@ -148,8 +200,18 @@ def main() -> int:
                                 result.GetSolution(bp.prog.decision_variables()))
         result = solve(bp, make_opts(args.feas_tol, args.opt_tol / 10, args.iters), "optimal", args.solver)
 
+    if args.restarts and not result.is_success():
+        result = restart_loop(bp, make_opts, args.solver, args.feas_tol, args.opt_tol / 10,
+                               args.burst_iters, args.restarts, result)
+
     if not result.is_success():
-        print("NOT SOLVED -- writing nothing")
+        viol = max_violation(bp.prog, result)
+        print(f"NOT SOLVED (best viol={viol:.4f}) -- writing best-effort output anyway "
+              f"for inspection, do not treat as a validated trajectory")
+        phases = extract(bp, result)
+        audit.run(bp, result, phases)
+        t, x, u = resample(phases)
+        save(t, x, u)
         return 1
 
     phases = extract(bp, result)
