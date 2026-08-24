@@ -25,7 +25,7 @@ OUT = Path(__file__).resolve().parent / "out" / "backflip.npz"
 RATE = 500.0
 
 
-def set_guess(bp: BackflipProgram, g: list[dict], footholds):
+def set_guess(bp: BackflipProgram, g: list[dict], footholds, impulse=None):
     for p, ph in enumerate(PHASES):
         t = g[p]["t"]
         bp.dc[p].SetInitialTrajectory(
@@ -37,7 +37,8 @@ def set_guess(bp: BackflipProgram, g: list[dict], footholds):
             bp.prog.SetInitialGuess(bp.lam[p].reshape(n, -1),
                                     g[p]["lam"].reshape(n, -1))
             bp.prog.SetInitialGuess(bp.foothold[p], footholds[p])
-    bp.prog.SetInitialGuess(bp.impulse, np.tile([0.0, 0.0, 12.0], (4, 1)))
+    bp.prog.SetInitialGuess(bp.impulse,
+                            impulse if impulse is not None else np.tile([0.0, 0.0, 12.0], (4, 1)))
 
 
 def ipopt_options(feas: float, opt: float, iters: int) -> SolverOptions:
@@ -80,6 +81,21 @@ def solve(bp: BackflipProgram, options, label: str, solver: str = "ipopt"):
           f"cost={result.get_optimal_cost():.4f} viol={max_violation(bp.prog, result):.4f} "
           f"in {time.time() - t0:.1f}s")
     return result
+
+
+def result_from_vector(bp: BackflipProgram, x: np.ndarray):
+    """Wrap a raw decision-variable vector (e.g. a saved restart checkpoint) as a real
+    MathematicalProgramResult, unchanged, so extract()/audit.run()/max_violation() all
+    work on it without a fresh solve. No pydrake binding exposes
+    set_decision_variable_index directly, so this goes through an actual IPOPT call
+    with max_iter=0 and the initial bound-push/pull disabled (confirmed bit-exact:
+    GetSolution afterwards reproduces x exactly)."""
+    o = SolverOptions()
+    sid = IpoptSolver.id()
+    o.SetOption(sid, "max_iter", 0)
+    o.SetOption(sid, "bound_push", 1e-12)
+    o.SetOption(sid, "bound_frac", 1e-12)
+    return IpoptSolver().Solve(bp.prog, x, o)
 
 
 def max_violation(prog, result) -> float:
@@ -184,13 +200,22 @@ def main() -> int:
                           "forward from each burst's result -- the single biggest lever "
                           "found for this problem so far, see STATUS.md")
     ap.add_argument("--burst-iters", type=int, default=300)
+    ap.add_argument("--warm-start", type=str, default=None,
+                     help="traj_opt/warm_start.py-exported .npz to seed the guess from "
+                          "(a resampled prior solve/checkpoint) instead of guess.py's "
+                          "analytic guess -- for mesh-refinement continuation")
     args = ap.parse_args()
 
     bp = BackflipProgram()
     print(f"program: {bp.prog.num_vars()} vars, {len(bp.prog.GetAllConstraints())} constraints")
 
-    g = Guess(bp.plant)
-    set_guess(bp, g.build(), g.footholds())
+    if args.warm_start:
+        import warm_start
+        g, footholds, impulse = warm_start.load(args.warm_start)
+        set_guess(bp, g, footholds, impulse)
+    else:
+        g = Guess(bp.plant)
+        set_guess(bp, g.build(), g.footholds())
 
     make_opts = snopt_options if args.solver == "snopt" else ipopt_options
     result = solve(bp, make_opts(args.feas_tol, args.opt_tol, args.iters), "feasibility", args.solver)

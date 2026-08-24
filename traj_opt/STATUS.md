@@ -1,18 +1,164 @@
 # Backflip trajectory optimization — status
 
-Last updated 2026-08-22. Not yet converged (`is_success()==False`). This is a
-resumption point, not a finished pipeline. Best result to date: IPOPT,
-unscaled constraint violation **0.0308** on the shrunk (14-knot flight)
-problem, found via restart-from-checkpoint (not a single continuous solve) —
-see "restarting from checkpoints is the real lever" below. Near-exact net
-rotation and clean contact forces; real remaining gaps in flight momentum
-conservation and integration accuracy that point at more flight knots.
+Last updated 2026-08-23. Not yet converged (`is_success()==False`). This is a
+resumption point, not a finished pipeline. Best confirmed result: IPOPT,
+unscaled constraint violation **0.0283**, on the 26-knot-flight problem (grown
+14→20→26 this session), audited at **4/6 checks passing** (rotation, CoM
+ballistic, friction cone, torque envelope). Angular-momentum drift is down to
+0.76% (from 38-44% at 14 knots); integration-vs-collocation drift plateaued
+around the 20-knot number (~0.34 rad/s in v) rather than continuing to shrink
+— worth a look before growing the mesh further. See "2026-08-23 session"
+below for the full progression and the mesh-refinement-vs-plain-guess finding.
 
 > **2026-08-20 note:** everything in this repo (`tools/`, `traj_opt/`, this
 > file, and the `go2_mjcf` submodule fix) is now committed and pushed,
 > including to the submodule's own fork remote — the "uncommitted working
 > tree, one accident from data loss" state flagged in the previous note is
 > resolved. See git log for the commit.
+
+## 2026-08-23 session: audit was half-wrong, and mesh refinement isn't a free lunch
+
+**Re-audited the best checkpoint independently** (`traj_opt/out/checkpoints/best.npy`
+from the production run left going at the end of the previous session — it had been
+killed, presumably by session teardown, after only 11 of its planned 20 restarts, but
+`best.npy` was already there: **max_violation 0.0298**, essentially the same quality as
+the previous session's 0.0308 find, on a completely independent restart trajectory. This
+is a real confirmation that restart-from-checkpoint reliably finds this quality of point,
+not a one-off.) Wrapping a raw checkpoint vector back into a proper
+`MathematicalProgramResult` for inspection (no pydrake binding exposes
+`set_decision_variable_index` directly) needs an actual zero-iteration IPOPT call with
+`bound_push`/`bound_frac` disabled — confirmed bit-exact (`GetSolution` reproduces the
+input vector exactly) — promoted to `solve_backflip.result_from_vector()`.
+
+**Two of the audit's five failures were the audit's own bugs, not the trajectory's:**
+
+- **Torque envelope "35 N·m overshoot" was checking the wrong bound.** Directly evaluated
+  the *actual* NLP constraint (`torque_speed_halfplanes`, box + both halfplanes) against
+  the checkpoint: exactly zero overshoot, everywhere. The audit was checking
+  `torque_speed_bound()` instead — documented (`go2_constants.py`,
+  `tools/check_envelope.py`) to *intentionally* diverge from the halfplanes in the
+  regenerating quadrant. Fixed `audit.check_envelope` to check the halfplanes (what's
+  actually enforced), not the bound. STATUS.md's own next-steps list flagged this as
+  worth checking; it was real.
+- **"Monotone=False, max step 22°" was reporting solver noise as a defect.** Isolated the
+  exact reversal: 0.00021° at the flight→absorb impact boundary (state continuity there
+  is an exact equality, but the checkpoint is only accepted to ~0.03 constraint
+  violation, not floating-point-exact) — six orders of magnitude below the reported "22°
+  step" figure, which is actually the single largest (monotone, real) per-knot rotation
+  during the fastest part of the tumble, not a reversal at all. Loosened the
+  monotonicity/magnitude thresholds in `audit.check_rotation` to be judged against the
+  solve's own tolerance (~1e-3) rather than a hardcoded 1e-6 that nothing but a true
+  `is_success()` result could ever pass.
+
+Net: **3/6 audit checks now pass** (rotation, friction cone, torque envelope) on the same
+checkpoint that scored 1/6 before. The three genuine remaining failures — CoM not exactly
+ballistic (6mm residual vs 1mm threshold), flight angular momentum drifting ~38-44%, and
+collocation-vs-tight-integrator drift (up to 4.6 rad/s in v by end of phase) — all
+independently implicate the same thing: **14 knots is too coarse to resolve flight.**
+
+**Grew flight 14→20 knots** (`schedule.py`; tightened `h_max` 0.055→0.040 so the extra
+knots can't just bunch up and reproduce the old coarse spacing — 20 knots over the same
+~0.55-0.67s flight leaves ~0.035s average h, comfortably inside the new bound).
+`nullity_check.py` re-run at the new size: **13/4052** equality rows, same thin/diffuse
+pattern as before (was 12/3680) — no new LICQ redundancy introduced by the resize.
+
+**Built mesh-refinement warm-starting** (`traj_opt/warm_start.py`): export resamples a
+solved phase's *continuous* reconstruction (`ReconstructStateTrajectory`, first-order-hold
+of u/lambda — the same interpolation the transcription itself assumes) at a new knot
+count, so an unchanged-knot-count phase round-trips near-exactly and a grown phase gets
+new interior points off the same curve, not new information invented. `solve_backflip.py`
+gained `result_from_vector()` (above) and `--warm-start PATH.npz` to seed from this
+instead of `guess.py`'s analytic guess.
+
+**Then found it's the wrong tool for THIS transition, and why.** Warm-starting the new
+20-knot flight from the 14-knot checkpoint gave an *initial* (iteration-0, before any
+solver step) unscaled violation of **586** — worse than even the pre-single-shooting
+kinematic-only guess ever was. Root cause, confirmed by direct dynamics evaluation
+(`plant.EvalTimeDerivatives` at resampled knots vs. finite-differencing the resampled
+velocity): the 14-knot checkpoint's per-component cubic reconstruction, in between its
+own (coarse) knots, implies joint accelerations up to ~1700 rad/s² that don't match the
+*true* forward dynamics at those same resampled points — the checkpoint was only ever
+weakly consistent with the ODE in Hermite-Simpson's coarse, *integral* (Simpson's-rule)
+sense at 14 points, not smoothly consistent in between them. This is the exact same
+pathology `audit.check_integration` already caught independently (worst v-drift 4.6 rad/s
+replaying this same checkpoint through a tight integrator) — refining the mesh makes a
+previously-hidden discretization error visible instead of fixing it for free. **Plain
+`guess.py` at 20 knots (no warm start) starts at violation 83** — worse than the 14-knot
+single-shot guess's ~6-30ish historically, but far better than the 586 from resampling,
+and uses the same already-validated single-shooting machinery (which is already
+knot-count-generic — no code changes needed to run it at any flight `n_knots`). **Using
+the plain analytic guess, not warm_start.py, for this transition.** `warm_start.py` is
+kept as real, working infrastructure (not deleted) — it's the right tool once a mesh
+already has a *smooth*, well-resolved solution to hand up to a finer one (e.g. a
+follow-up 20→26 step, after 20 itself is in good shape), just not for jumping straight
+from an under-resolved 14-knot source.
+
+**Launched a production solve at 20 knots**: `--iters 400 --feas-tol 1e-4 --opt-tol 1e-2
+--restarts 30 --burst-iters 300`, plain analytic guess, via the harness's own
+`run_in_background` tracking this time (not a bare `nohup` + separate watcher — that
+combination was exactly what left the previous session unable to confirm its production
+run's fate). Old 14-knot checkpoints backed up to
+`traj_opt/out/checkpoints_flight14_backup/` before this run's restart loop could
+overwrite `traj_opt/out/checkpoints/`.
+
+**Result: this is the best trajectory the project has produced.** All 30 restarts ran
+to completion (~2.6 hours), best violation **0.0310** (restart 11) — essentially the
+same constraint-violation *level* as the 14-knot best (0.0298/0.0308), but at 20 knots
+that level now comes with the discretization errors actually fixed, exactly as
+predicted:
+
+| audit check | 14 knots | 20 knots |
+|---|---|---|
+| net rotation | PASS (-359.9999°) | PASS (-359.9991°) |
+| CoM ballistic | **FAIL**, 6.1mm residual | **PASS**, 0.34mm residual |
+| angular momentum conserved | **FAIL**, 38-44% drift | FAIL, but **1.16%** drift (~30x better) |
+| friction cone | PASS | PASS |
+| torque envelope (halfplanes) | PASS | PASS |
+| collocation vs. tight integrator | **FAIL**, 0.64-1.14 (q) / 4.6-8.6 (v) | FAIL, but **0.036 (q) / 0.33 (v)** (~15-25x better) |
+
+**4/6 audit checks now pass**, and the two still-failing ones are the same
+discretization signature, just an order of magnitude smaller — not a new problem, the
+same one continuing to shrink with mesh resolution, right where it should.
+
+**Pushed to 26 knots next**, and re-tested the warm-start-vs-plain-guess question now
+that a genuinely smooth, well-resolved (not jerky) 20-knot solution exists to warm-start
+from: warm-starting from it gave iteration-0 violation **228** — much better than
+resampling the jerky 14-knot source (586), confirming the smoothness theory, but still
+*worse* than the plain analytic single-shot guess at 26 knots, which starts at **83.1** —
+essentially identical to its own 20-knot number, since it re-simulates the continuous
+dynamics from scratch at whatever knot count is asked and is therefore dynamically
+self-consistent by construction regardless of sampling density, whereas any
+resampling-based warm start (even from a good source) necessarily reconstructs from a
+*discrete*, only-approximately-consistent trajectory. **Conclusion: for this problem,
+`guess.py`'s single-shooting is the better warm start at every knot count tried so far,
+full stop** — `warm_start.py`'s mesh-refinement resampling has not yet found a regime
+where it beats it, though it remains available if a future need arises (e.g. warm-
+starting after a *non*-knot-count formulation change, where the analytic guess would
+need to change too). Launched the same restart pipeline at 26 knots with the plain
+guess; nullity re-checked clean first (13/4424, same benign pattern).
+
+**Result: another real improvement, best result of the project so far.** All 30
+restarts completed (~2h50m), best violation **0.0283** (restart 28) — slightly better
+than the 20-knot best (0.0310), still 4/6 audit checks passing:
+
+| audit check | 14 knots | 20 knots | 26 knots |
+|---|---|---|---|
+| net rotation | PASS | PASS | PASS |
+| CoM ballistic | FAIL, 6.1mm | PASS, 0.34mm | PASS, 0.21mm |
+| angular momentum conserved | FAIL, 38-44% | FAIL, 1.16% | FAIL, **0.76%** |
+| friction cone | PASS | PASS | PASS |
+| torque envelope (halfplanes) | PASS | PASS | PASS |
+| collocation vs. tight integrator | FAIL, 0.64-1.14(q)/4.6-8.6(v) | FAIL, 0.036(q)/0.33(v) | FAIL, 0.037(q)/**0.34(v)** |
+
+Angular momentum kept improving with the extra knots (1.16%→0.76%), but the
+integration-drift number **plateaued** rather than continuing to shrink (0.33→0.34 in
+v, essentially flat) — the first sign in this progression that flight knot count alone
+may not be the only thing left to fix for that specific check. Worth investigating
+before growing the mesh further (26→32 or beyond): candidates are the `load`/`absorb`
+phases (still analytic-guess-only, never single-shot, and still relatively coarse at
+12/16 knots) or the impact map itself, rather than assuming flight is still the
+bottleneck. Stopping the mesh-growth ladder here for this session — 26 knots is the
+shipped configuration (`schedule.py`).
 
 ## 2026-08-20 session: bug 3 (a second instance of bug 2's mechanism)
 
@@ -375,35 +521,31 @@ option-name strings in `libdrake.so`.
 
 ## Concrete next steps, in order of expected payoff
 
-1. **Make restart-from-checkpoint a real, reusable feature of
-   `solve_backflip.py`**, not scratch scripts in `/tmp`. It's the single
-   biggest lever found in this project (5.7 → 0.0308). Needs: a loop of
-   short bursts (a few hundred iterations each) with a `max_violation()`
-   helper (already written in the scratch scripts — walks
-   `prog.GetAllConstraints()`, no need for IPOPT's own printed summary),
-   chaining forward from each burst's raw result (**not** reverting to the
-   best-seen point between bursts — reverting to an identical checkpoint
-   with identical options just reproduces the identical result, since IPOPT
-   is deterministic given the same start and options), and saving every
-   burst's decision-variable vector to disk immediately so a good point is
-   never lost the way run 1's 0.055 result was.
-2. **Grow the flight phase's knot count back up** (14→20→26), warm-starting
-   from the 0.0308 checkpoint (once saved via 1) rather than `guess.py`'s
-   analytic guess. This directly targets the audit's two real remaining
-   failures (integration drift, angular momentum conservation) — both look
-   like coarse-discretization artifacts on a checkpoint that already gets
-   the maneuver essentially right.
-3. **Re-check the torque-envelope audit failure against
-   `torque_speed_halfplanes()` directly**, not `torque_speed_bound()` — the
-   two are known to diverge in the regenerating quadrant, so some (maybe
-   all) of the reported 39 N.m overshoot may not reflect a violated NLP
-   constraint at all.
-4. **Extend single-shooting to `load`/`absorb`** for full internal
-   consistency, though these are currently static holds and already provably
-   exact fixed points of their own equilibrium `u`/`lambda` — expected low
-   payoff, do this only after 1-2.
-5. Run `traj_opt/nullity_check.py` again after any further `program.py` or
-   `guess.py` change — cheap (~1 min), and it's what found bugs 1-3.
+1. **Figure out why integration-vs-collocation drift plateaued at 26 knots**
+   (0.33→0.34 rad/s in v, flat) while angular momentum kept improving
+   (1.16%→0.76%) — these two checks moved together at every step before now,
+   so something else is now the limiting factor. Prime suspects: `load`/
+   `absorb` are still on the plain kinematic guess (never single-shot) and
+   are relatively coarse (12/16 knots) — growing *those*, or extending
+   single-shooting to them (next-ranked item below), may matter more than
+   further flight knots at this point. Also worth isolating which PHASE's
+   `check_integration` drift dominates (it currently only reports the worst
+   across all four phases) before assuming it's still flight.
+2. If flight is still the bottleneck once (1) is checked, growing **26→32**
+   is the mesh-refinement move, and unlike the 14→20/20→26 transitions,
+   `warm_start.py` may finally be worth another look now that 26 knots is a
+   well-resolved, 4/6-passing source (though 20→26 with `warm_start.py` was
+   not tried directly — the plain analytic guess was used for both 14→20 and
+   20→26, and won both times against warm-starting from the *previous* good
+   checkpoint. Not yet tested: warm-starting a phase from a checkpoint at
+   the SAME resolution, i.e. using the 26-knot result to seed a fresh
+   26-knot restart search, instead of re-deriving the analytic guess from
+   scratch each time).
+3. **Extend single-shooting to `load`/`absorb`** — see (1), this may now be
+   higher-payoff than previously ranked, given the plateau.
+4. Run `traj_opt/nullity_check.py` again after any further `program.py` or
+   `schedule.py` change — cheap (~1 min), and it's what found bugs 1-3.
+   Already re-run clean (13/4424) after the 20→26 knot growth.
 
 ## Files
 
@@ -412,13 +554,14 @@ option-name strings in `libdrake.so`.
 | `tools/go2_constants.py` | shared constants, Drake↔MuJoCo mapping | done, `verify_parity.py` passes 6/6 |
 | `tools/check_envelope.py` | unit check for the linear torque-speed envelope | done, passes |
 | `tools/tuck_box.py` | self-collision-free sagittal joint box (flight only) | done |
-| `traj_opt/schedule.py` | phase table — flight currently **14 knots** (shrunk for the diagnostic above, not yet grown back) | — |
-| `traj_opt/program.py` | the NLP: constraints, all three fixed bugs live here | builds cleanly, nullity 12/3680 (was 335), not yet solved |
+| `traj_opt/schedule.py` | phase table — flight now **26 knots** (grown 14→20→26, 2026-08-23), `h_max` tightened 0.055→0.040→0.032 | — |
+| `traj_opt/program.py` | the NLP: constraints, all three fixed bugs live here | builds cleanly, nullity 13/4424 at the 26-knot size (was 12/3680 at 14 knots), not yet solved |
 | `traj_opt/nullity_check.py` | FD-Jacobian/SVD LICQ diagnostic — found bugs 1-3 | done, rerun after any constraint-family change |
-| `traj_opt/guess.py` | analytic initial guess, now single-shooting launch/flight | done, best IPOPT result yet (violation 5.7) |
-| `traj_opt/solve_backflip.py` | CLI, supports `--solver ipopt\|snopt`, `--feas-tol`, `--opt-tol` | `extract()` 3D-`GetSolution` bug fixed (never triggered before, no solve had reached success); restart-from-checkpoint (next steps step 1) not yet built in, only in scratch scripts |
-| `traj_opt/audit.py` | post-solve physics audit | untested end-to-end (never reached, no solve has succeeded) |
-| `traj_opt/replay.py`, `traj_opt/mj_divergence.py` | meshcat playback, MuJoCo open-loop divergence (TODO-10) | untested end-to-end, same reason |
+| `traj_opt/guess.py` | analytic initial guess, single-shooting launch/flight, knot-count-generic (no changes needed to run at any flight size) | done, best IPOPT result yet at 14 knots (violation 5.7 pre-restart, 0.0298-0.0308 post-restart); at 20 knots starts at violation 83 pre-solve |
+| `traj_opt/warm_start.py` | mesh-refinement warm-start: export a solved phase's continuous reconstruction resampled at a new knot count, `--warm-start` flag on `solve_backflip.py` | done, but wrong tool for 14→20 (resampling an under-resolved source gave violation 586, worse than the plain analytic guess's 83) — keep for refining an already-smooth solution (e.g. a later 20→26) |
+| `traj_opt/solve_backflip.py` | CLI, `--solver ipopt\|snopt`, `--feas-tol`, `--opt-tol`, `--restarts`/`--burst-iters`, `--warm-start` | `extract()` 3D-`GetSolution` bug fixed; restart-from-checkpoint is a real feature; `result_from_vector()` added for inspecting raw checkpoints without a fresh solve |
+| `traj_opt/audit.py` | post-solve physics audit | torque-envelope check fixed to test `torque_speed_halfplanes` (was testing the wrong, intentionally-divergent bound); rotation-check tolerances loosened to the solve's own scale (were tighter than any non-`is_success()` result could ever pass) |
+| `traj_opt/replay.py`, `traj_opt/mj_divergence.py` | meshcat playback, MuJoCo open-loop divergence (TODO-10) | untested end-to-end, no solve has reached `is_success()` yet |
 
 Run with:
 ```
