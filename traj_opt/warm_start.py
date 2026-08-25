@@ -10,8 +10,7 @@ being grown gets new interior points sampled off the same curve rather than any 
 information invented -- the risk this defuses is a *worse* guess, not a materially
 different one.
 
-    PYTHONPATH=/opt/drake/lib/python3.12/site-packages:tools:traj_opt \
-        .venv/bin/python traj_opt/warm_start.py --checkpoint traj_opt/out/checkpoints/best.npy \
+    uv run traj_opt/warm_start.py --checkpoint traj_opt/out/checkpoints/best.npy \
             --out traj_opt/out/checkpoints/warm_flight20.npz --flight-knots 20
 
 Run this BEFORE editing traj_opt/schedule.py's knot counts -- it must build the OLD

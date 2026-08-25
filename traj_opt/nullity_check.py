@@ -12,8 +12,7 @@ per phase, so raw variable names collide across phases and are useless for group
 both methods to auto-tag each binding with its Python call site (function:line) before building
 the program, purely for readable grouping -- this changes no actual constraint.
 
-    PYTHONPATH=/opt/drake/lib/python3.12/site-packages:tools:traj_opt \
-        .venv/bin/python traj_opt/nullity_check.py
+    uv run traj_opt/nullity_check.py
 """
 
 from __future__ import annotations

@@ -27,7 +27,7 @@ from pydrake.systems.framework import DiagramBuilder
 from pydrake.systems.primitives import ConstantVectorSource, TrajectorySource
 from pydrake.trajectories import PiecewisePolynomial
 
-import go2_constants as K
+from go2_backflip import constants as K
 from program import make_plant
 from schedule import PHASES
 

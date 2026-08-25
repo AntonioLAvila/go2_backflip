@@ -14,7 +14,7 @@ from pydrake.systems.analysis import Simulator
 from pydrake.systems.framework import DiagramBuilder
 from pydrake.systems.primitives import ConstantVectorSource, TrajectorySource
 
-import go2_constants as K
+from go2_backflip import constants as K
 from program import make_plant, XQ, XV
 from schedule import FLIGHT
 
@@ -97,7 +97,7 @@ def check_contact(phases):
 
 def check_envelope(phases):
     """Check against torque_speed_halfplanes -- the linear relaxation actually enforced
-    in program.py -- not torque_speed_bound. The two are documented (go2_constants.py,
+    in program.py -- not torque_speed_bound. The two are documented (go2_backflip/constants.py,
     tools/check_envelope.py) to diverge in the regenerating quadrant, where the
     halfplanes intentionally leave torque underrated relative to the true envelope; that
     divergence would show up here as a spurious failure against a constraint the NLP was

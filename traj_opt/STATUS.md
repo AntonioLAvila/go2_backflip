@@ -35,7 +35,7 @@ input vector exactly) — promoted to `solve_backflip.result_from_vector()`.
 - **Torque envelope "35 N·m overshoot" was checking the wrong bound.** Directly evaluated
   the *actual* NLP constraint (`torque_speed_halfplanes`, box + both halfplanes) against
   the checkpoint: exactly zero overshoot, everywhere. The audit was checking
-  `torque_speed_bound()` instead — documented (`go2_constants.py`,
+  `torque_speed_bound()` instead — documented (`go2_backflip/constants.py`,
   `tools/check_envelope.py`) to *intentionally* diverge from the halfplanes in the
   regenerating quadrant. Fixed `audit.check_envelope` to check the halfplanes (what's
   actually enforced), not the bound. STATUS.md's own next-steps list flagged this as
@@ -551,7 +551,7 @@ option-name strings in `libdrake.so`.
 
 | Path | Role | State |
 |---|---|---|
-| `tools/go2_constants.py` | shared constants, Drake↔MuJoCo mapping | done, `verify_parity.py` passes 6/6 |
+| `src/go2_backflip/constants.py` | shared constants, Drake↔MuJoCo mapping | done, `verify_parity.py` passes 6/6 |
 | `tools/check_envelope.py` | unit check for the linear torque-speed envelope | done, passes |
 | `tools/tuck_box.py` | self-collision-free sagittal joint box (flight only) | done |
 | `traj_opt/schedule.py` | phase table — flight now **26 knots** (grown 14→20→26, 2026-08-23), `h_max` tightened 0.055→0.040→0.032 | — |

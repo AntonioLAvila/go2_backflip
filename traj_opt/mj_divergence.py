@@ -5,8 +5,7 @@ contact: Drake sees condim=3 / mu=0.8 point contact, MuJoCo uses condim=6, an el
 and solimp compliance. The number this prints is the robustness budget the RL stage inherits,
 not a bug -- it is expected to grow the moment a foot touches down.
 
-    PYTHONPATH=/opt/drake/lib/python3.12/site-packages:tools:traj_opt \
-        .venv/bin/python traj_opt/mj_divergence.py
+    uv run traj_opt/mj_divergence.py
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-import go2_constants as K
+from go2_backflip import constants as K
 
 NPZ = Path(__file__).resolve().parent / "out" / "backflip.npz"
 SCENE = str(Path(K.MODEL_PATH).parent / "scene.xml")

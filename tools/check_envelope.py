@@ -1,6 +1,6 @@
 """torque_speed_halfplanes() must reproduce torque_speed_bound(), and differ only where intended.
 
-    .venv/bin/python tools/check_envelope.py
+    uv run tools/check_envelope.py
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ import sys
 
 import numpy as np
 
-import go2_constants as K
+from go2_backflip import constants as K
 
 
 def main() -> int:

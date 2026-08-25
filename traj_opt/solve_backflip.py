@@ -1,7 +1,6 @@
 """Solve the backflip and write traj_opt/out/backflip.npz in MuJoCo convention.
 
-    PYTHONPATH=/opt/drake/lib/python3.12/site-packages:tools:traj_opt \
-        .venv/bin/python traj_opt/solve_backflip.py
+    uv run traj_opt/solve_backflip.py
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ import numpy as np
 from pydrake.solvers import IpoptSolver, SnoptSolver, SolverOptions
 from pydrake.trajectories import PiecewisePolynomial
 
-import go2_constants as K
+from go2_backflip import constants as K
 import audit
 from guess import Guess
 from program import BackflipProgram, XQ, XV

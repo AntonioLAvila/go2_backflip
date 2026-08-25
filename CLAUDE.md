@@ -19,51 +19,52 @@ assuming anything about where the optimization currently stands.
 
 ## Environment
 
-Drake is a system install at `/opt/drake`, not a venv package — every script that touches
-`pydrake` needs it on `PYTHONPATH` explicitly. `tools/` and `traj_opt/` also import across each
-other (`traj_opt` scripts do `import go2_constants` from `tools/`), so the standard invocation
-for anything under `traj_opt/` is:
+The project is managed by **uv** (`pyproject.toml` + `uv.lock`, Python 3.12, venv at `.venv`).
+Drake and MuJoCo are ordinary locked dependencies — there is no `/opt/drake` system install to
+put on `PYTHONPATH`, and no `PYTHONPATH` is needed at all. Every script runs the same way:
 
 ```
-PYTHONPATH=/opt/drake/lib/python3.12/site-packages:tools:traj_opt \
-    .venv/bin/python traj_opt/<script>.py
+uv run traj_opt/<script>.py
+uv run tools/<script>.py
 ```
 
-Scripts under `tools/` that only need Drake (not `traj_opt`) drop the trailing `:traj_opt`; pure
-MuJoCo/numpy scripts (`tools/check_envelope.py`, `tools/tuck_box.py`) need no `PYTHONPATH` at
-all. Python 3.12, venv at `.venv`.
+The shared constants live in the installed package `go2_backflip` (`src/go2_backflip/`), which
+`uv sync` installs in **editable** mode, so edits to it take effect with no reinstall. Modules
+inside `traj_opt/` still import each other flat (`from program import ...`); that works because
+Python puts a script's own directory on `sys.path`, which is why only the cross-directory
+constants import needed to become a package.
 
 ## Commands
 
 ```bash
 # Prove Drake and MuJoCo agree on go2.xml (structure, mass, mass matrix, inverse dynamics,
 # open-loop torque tape). Checks A-E must pass; F is report-only (contact is expected to differ).
-PYTHONPATH=/opt/drake/lib/python3.12/site-packages .venv/bin/python tools/verify_parity.py
+uv run tools/verify_parity.py
 
 # Solve the backflip. Writes traj_opt/out/backflip.npz (MuJoCo convention) even on failure,
 # for inspection. Key flags: --solver {ipopt,snopt} (default ipopt), --iters, --feas-tol,
 # --opt-tol, --feasibility-only, --restarts N --burst-iters K (short-burst restart search --
 # see "Restart-from-checkpoint" below, the single biggest lever found for this problem).
-PYTHONPATH=/opt/drake/lib/python3.12/site-packages:tools:traj_opt \
-    .venv/bin/python traj_opt/solve_backflip.py --restarts 20 --burst-iters 300
+uv run traj_opt/solve_backflip.py --restarts 20 --burst-iters 300
 
 # Diagnose "solver reports infeasible on a problem that looks feasible" -- see LICQ note below.
-PYTHONPATH=/opt/drake/lib/python3.12/site-packages:tools:traj_opt \
-    .venv/bin/python traj_opt/nullity_check.py
+uv run traj_opt/nullity_check.py
 
 # Physics audit of a solved trajectory (rotation, ballistic flight, friction cone, torque
 # envelope, collocation-vs-integration drift) -- runs automatically at the end of solve_backflip.py.
 
-# Meshcat playback / MuJoCo open-loop divergence check of traj_opt/out/backflip.npz:
-PYTHONPATH=/opt/drake/lib/python3.12/site-packages:tools:traj_opt \
-    .venv/bin/python traj_opt/replay.py [--speed 0.25] [--loops 3]
-PYTHONPATH=/opt/drake/lib/python3.12/site-packages:tools:traj_opt \
-    .venv/bin/python traj_opt/mj_divergence.py
+# Meshcat playback / MuJoCo open-loop divergence check of traj_opt/out/backflip.npz.
+# replay.py records a meshcat animation (one frame per 500 Hz knot) and holds the server
+# open, so playback speed is a timeScale slider in the browser's "Animations" panel rather
+# than a CLI flag. --live restores the old real-time streaming pass.
+uv run traj_opt/replay.py [--fps 500] [--no-hold]
+uv run traj_opt/replay.py --live [--speed 0.25] [--loops 3]
+uv run traj_opt/mj_divergence.py
 
-# Regenerate the self-collision-free sagittal tuck box (tools/go2_constants.py:TUCK_BOX) and
+# Regenerate the self-collision-free sagittal tuck box (src/go2_backflip/constants.py:TUCK_BOX) and
 # sanity-check the linear torque-speed envelope against the true (non-smooth) one:
-.venv/bin/python tools/tuck_box.py
-.venv/bin/python tools/check_envelope.py
+uv run tools/tuck_box.py
+uv run tools/check_envelope.py
 ```
 
 No test suite exists; `verify_parity.py`, `check_envelope.py`, and the audit in
@@ -72,7 +73,7 @@ No test suite exists; `verify_parity.py`, `check_envelope.py`, and the audit in
 ## Architecture
 
 **`go2_mjcf/`** (git submodule) is the single ground-truth MJCF, parsed independently by Drake
-and MuJoCo. **`tools/go2_constants.py`** is the single source of truth for everything derived
+and MuJoCo. **`src/go2_backflip/constants.py`** is the single source of truth for everything derived
 from it — actuator limits, poses, joint index layout, and the Drake↔MuJoCo state conversion —
 specifically so the Drake TO and the (future) mjlab RL config cannot drift apart. Two
 conversion details worth knowing before touching either engine: the quaternion/position blocks

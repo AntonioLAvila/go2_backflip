@@ -21,7 +21,7 @@ from pydrake.multibody.tree import JacobianWrtVariable
 from pydrake.planning import DirectCollocation
 from pydrake.solvers import MathematicalProgram
 
-import go2_constants as K
+from go2_backflip import constants as K
 from schedule import PHASES, FLIGHT, IMPACT
 
 NQ, NV, NU, NX = 19, 18, 12, 37

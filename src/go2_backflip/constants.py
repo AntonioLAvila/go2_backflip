@@ -14,7 +14,7 @@ from pathlib import Path
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 MODEL_PATH = str(REPO_ROOT / "go2_mjcf" / "go2.xml")
 
 # Contact point of the foot sphere geom, in the calf frame: geom pos minus its radius.

@@ -7,7 +7,7 @@ the flight knots need a bound. A box is enough and costs the NLP nothing.
 
 go2.xml carries no floor, so any contact MuJoCo reports here is a self-collision.
 
-    .venv/bin/python tools/tuck_box.py
+    uv run tools/tuck_box.py
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ import json
 import mujoco
 import numpy as np
 
-import go2_constants as K
+from go2_backflip import constants as K
 
 # The flight phase has to tuck AND extend again for the landing, so the box is grown from the
 # region spanned by both poses, not from the tuck alone.

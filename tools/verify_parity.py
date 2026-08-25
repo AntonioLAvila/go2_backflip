@@ -4,7 +4,7 @@ Checks A-E must pass; F only reports, since the engines are expected to disagree
 contact. Check A is the regression guard for the nested-default-class trap that
 silently gave the thigh joints the wrong axis.
 
-    PYTHONPATH=/opt/drake/lib/python3.12/site-packages .venv/bin/python tools/verify_parity.py
+    uv run tools/verify_parity.py
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pydrake.multibody.parsing import Parser
 from pydrake.multibody.plant import MultibodyPlant
 from pydrake.multibody.tree import JointActuatorIndex, RevoluteJoint
 
-import go2_constants as K
+from go2_backflip import constants as K
 
 RESULTS: list[tuple[str, bool, str]] = []
 
