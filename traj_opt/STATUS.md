@@ -1,20 +1,112 @@
 # Backflip trajectory optimization — status
 
-Last updated 2026-08-23. Not yet converged (`is_success()==False`). This is a
+Last updated 2026-08-25. Not yet converged (`is_success()==False`). This is a
 resumption point, not a finished pipeline. Best confirmed result: IPOPT,
-unscaled constraint violation **0.0283**, on the 26-knot-flight problem (grown
-14→20→26 this session), audited at **4/6 checks passing** (rotation, CoM
-ballistic, friction cone, torque envelope). Angular-momentum drift is down to
-0.76% (from 38-44% at 14 knots); integration-vs-collocation drift plateaued
-around the 20-knot number (~0.34 rad/s in v) rather than continuing to shrink
-— worth a look before growing the mesh further. See "2026-08-23 session"
-below for the full progression and the mesh-refinement-vs-plain-guess finding.
+unscaled constraint violation **0.0283**, on the 26-knot-flight problem,
+audited at **4/6 checks passing**.
+
+> **Read the 2026-08-25 section FIRST.** That 4/6 result is not usable as an RL
+> reference: visual review found, and measurement confirmed, that it drives the
+> rear thigh 69 mm and the head 72 mm through the floor, and never tucks. The
+> audit passed it because the audit has no floor check and the NLP has no
+> geometry beyond four point-feet. Work on that is **in progress and only
+> partly landed** — see the checklist there before touching anything.
 
 > **2026-08-20 note:** everything in this repo (`tools/`, `traj_opt/`, this
 > file, and the `go2_mjcf` submodule fix) is now committed and pushed,
 > including to the submodule's own fork remote — the "uncommitted working
 > tree, one accident from data loss" state flagged in the previous note is
 > resolved. See git log for the commit.
+
+## 2026-08-25 session: the trajectory clips the floor and never tucks (IN PROGRESS)
+
+User reviewed the solved trajectory visually and reported three things: the heels clip the
+ground on launch, the robot barely tucks after takeoff, and the legs sit near full extension
+for much of the flip. All three reproduce numerically, and all three come from the same root
+cause: **the NLP's only geometric knowledge of the robot is four point-feet.** Nothing else
+about its shape exists in the program, so nothing stops the rest of it from sweeping through
+the floor, and nothing rewards folding up.
+
+### Measured on the shipped `out/backflip.npz` (26-knot, viol 0.0283, "4/6 passing")
+
+Lowest point of every collision geom, over the trajectory:
+
+| geom | min z | when |
+|---|---|---|
+| `head_sphere` | **−71.6 mm** | t = 1.128 s (just after touchdown, still 25° from upright) |
+| `RL/RR_thigh_col` | **−68.6 mm** | t = 0.280 s (mid-launch) |
+| `RL/RR_calf_upper` | −65.8 mm | t = 0.280 s |
+| `RL/RR` foot sphere | −27.6 mm | t = 0.282 s |
+
+Flight inertia and what it costs:
+
+| pose | I_yy (kg·m²) | ω = L/I | time for 4.36 rad | CoM rise needed |
+|---|---|---|---|---|
+| solved trajectory, mid-flight | **0.659** | 6.41 | 0.680 s | **0.567 m** |
+| just standing (HOME) | 0.484 | 8.74 | 0.499 s | 0.305 m |
+| `TUCK_LEGS` (2.2, −2.7) | 0.452 | 9.35 | 0.466 s | 0.267 m |
+
+The solved flight pose is a **worse** rotational configuration than simply standing there.
+Both knees ride the *straightest* edge of `TUCK_BOX` for essentially the whole flight
+(`calf_rear` = −0.838 vs the box's −0.83776 bound; `calf_front` = −1.686 vs −1.685983), which
+is the direct evidence for "legs near full extension": `TUCK_BOX` only asserts *not
+self-colliding*, and near-full extension satisfies that. Nothing in the cost (torque² +
+torque-rate² + time) rewards tucking — actively folding the legs *costs* torque — so the
+optimizer paid for the 46% larger inertia with a 0.57 m CoM rise instead. **Tucking is the
+single biggest feasibility lever left: it roughly halves the jump the launch has to produce.**
+
+### Root causes, and a fourth bug found on the way
+
+1. **No floor for anything but the feet.** `_add_clearance` only bounds swing-foot P_FOOT
+   height and (flight only) base z. Load, launch and absorb have no torso/head constraint at
+   all, which is why the head punches through on landing.
+2. **The foot is a sphere, not a point.** `P_FOOT` is the bottom of the 22 mm foot sphere
+   *only when the calf is vertical*, and the calf is never vertical — 51.6° at HOME, past 90°
+   at launch. Pinning that body-fixed point to z = 0 buries the sphere by R·(1−cos tilt).
+3. **`STAND_BASE_HEIGHT` inherits that error**: the "corrected" 0.2800479196045126 rests
+   P_FOOT on the floor and therefore the foot *sphere* **8.3 mm under it** — so the reference
+   starts and ends already penetrating. Correct value: **0.2883725003026**.
+4. **The audit cannot see any of this.** It passed 4/6 while the robot was 69 mm through the
+   floor. A floor-penetration check has to be added, or this class of error stays invisible.
+
+### Landed this session
+
+- `tools/clearance_points.py` (new): generates sphere-swept witness points bounding every
+  collision geom in `go2.xml`, grouped per body kind, and **verifies** them against MuJoCo's
+  own geom poses over 4000 random sagittal poses (conservative to 1e-16 m). Same idiom as
+  `tools/tuck_box.py`.
+- `constants.py`: `R_FOOT`, `P_ANKLE`, `P_FOOT` re-derived from them (numerically unchanged),
+  plus the generated `COLLISION_SPHERES` table and a `FLIGHT_TUCK` window. **All of these are
+  inert** — nothing reads them yet, so the program builds and solves exactly as before
+  (4934 vars, 2902 constraints, unchanged).
+- `STAND_BASE_HEIGHT` is deliberately **left at the old, wrong value** with a comment saying
+  why: raising the base 8.3 mm while the foot pin still targets P_FOOT contradicts the pin and
+  makes the NLP infeasible. It must land in the same commit as the contact-model change.
+
+### Not yet done — the actual fix, in order
+
+1. `program.py` `_Kin.pos/jac`: pin and apply contact force at the foot sphere's **lowest
+   point**, `P_ANKLE − R_FOOT·(R_CW ẑ_W)`, instead of the body-fixed `P_FOOT`. `pos()` becomes
+   `centre_world − R_FOOT·ẑ_W`; `jac()` takes the q-dependent material point so the force is
+   applied where it actually acts (using the centre instead leaves a ~2.5 N·m moment error at
+   the knee, ~5% of its limit). Then flip `STAND_BASE_HEIGHT` to 0.2883725003026 in the same
+   commit.
+2. `program.py` new `_add_body_clearance()`: `p_z(q) ≥ r` for every `COLLISION_SPHERES` witness
+   point at every knot, on the base + `FL_*` + `RL_*` only — 27 points/knot. The right legs are
+   redundant because the NLP pins the hips and mirrors thigh/calf to ±1e-4, so their z differs
+   by tens of microns; the audit should still check all four so any asymmetry leak is caught.
+3. `program.py`: replace the flight `TUCK_BOX` bound with `FLIGHT_TUCK` on the *interior*
+   flight knots (leave a few knots at each end free to retract after takeoff and extend before
+   landing), and add a tuck-tracking term to `add_cost` so the solver settles inside the window
+   rather than riding its edge.
+4. `guess.py`: `self.P` must use the same sphere convention, so `place()`/`footholds()` stay
+   consistent with the new pin.
+5. `audit.py`: add a floor-penetration check over all four legs + base (reuse
+   `COLLISION_SPHERES`), and re-check the tuck. This is what would have caught the whole thing.
+6. **Re-run `nullity_check.py`** — mandatory after any structural change — then re-solve with
+   `--restarts 20 --burst-iters 300` and expect the numbers to move: a real tuck should cut the
+   required CoM rise from ~0.57 m to ~0.27 m, so the previous violation figures are not
+   comparable across this change.
 
 ## 2026-08-23 session: audit was half-wrong, and mesh refinement isn't a free lunch
 

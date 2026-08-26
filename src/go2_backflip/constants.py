@@ -17,9 +17,18 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 MODEL_PATH = str(REPO_ROOT / "go2_mjcf" / "go2.xml")
 
-# Contact point of the foot sphere geom, in the calf frame: geom pos minus its radius.
-# Drake drops the <site> tags, so this is the only handle on the foot.
-P_FOOT = np.array([-0.002, 0.0, -0.235])
+# The foot is a SPHERE, not a point: radius 22 mm centred at P_ANKLE in the calf frame.
+# Drake drops the <site> tags, so the geom is the only handle on the foot.
+#
+# P_FOOT (the sphere's bottom, body-fixed) is the contact point ONLY while the calf is
+# vertical, and the calf is never vertical here -- it is already tilted 51.6 deg at HOME and
+# past 90 deg at the launch pose. Treating P_FOOT as the contact point buries the sphere
+# R*(1 - cos tilt) below the floor: 8.3 mm just standing, 28 mm at launch. The point actually
+# touching a flat floor is the one directly under the centre, R below it in WORLD z, so
+# contact geometry must be written about P_ANKLE (see program.py's _Kin).
+R_FOOT = 0.022
+P_ANKLE = np.array([-0.002, 0.0, -0.213])
+P_FOOT = P_ANKLE - np.array([0.0, 0.0, R_FOOT])
 FEET = ["FL", "FR", "RL", "RR"]
 
 # Drake sees mu=0.8 on the foot sphere; the TO runs leaner on purpose, as sim-to-real margin.
@@ -108,9 +117,14 @@ TUCK_LEGS = np.array([0.0, 2.2, -2.7] * 4)
 HOME_BASE_HEIGHT = 0.27
 TUCK_BASE_HEIGHT = 0.30
 
-# HOME_BASE_HEIGHT is the keyframe value and sits 1.0 cm INTO the floor: at HOME_LEGS it puts
-# every P_FOOT at z = -0.01. This is the height that puts them at z = 0, and it is what the
-# trajectory optimization must start and end from.
+# HOME_BASE_HEIGHT is the keyframe value and sits well INTO the floor. This is the height that
+# rests HOME_LEGS on it, and it is what the trajectory optimization must start and end from.
+# NOT YET CORRECTED, deliberately. Measured to P_FOOT, this rests the foot SPHERE 8.3 mm
+# INTO the floor, because the calf is tilted 51.6 deg at HOME (see R_FOOT above) -- so the
+# trajectory starts and ends with the feet already through the ground. The corrected value is
+# 0.2883725003026, but it is only consistent once program.py pins the sphere rather than
+# P_FOOT: changing it alone contradicts the existing foot-pin constraint (base 8.3 mm higher,
+# foot still pinned to z = 0) and makes the NLP infeasible. The two land together.
 STAND_BASE_HEIGHT = 0.2800479196045126
 
 
@@ -222,4 +236,59 @@ TUCK_BOX = {
     "calf_front": (-2.7227, -1.685983),
     "thigh_rear": (0.741775, 3.5256),
     "calf_rear": (-2.7227, -0.83776),
+}
+
+
+# Floor-clearance witness spheres, per body KIND, generated and verified by
+# tools/clearance_points.py -- each row is (x, y, z, radius) in that body's own frame, and the
+# union of the spheres contains the body's collision geoms. The trajectory optimization knows
+# no geometry beyond the four feet, so without these nothing stops the rest of the robot from
+# sweeping through the floor, and it did: a solved trajectory drove the rear thigh 69 mm and
+# the head 72 mm below z = 0. A flat floor only needs each geom's lowest point, and every
+# collision geom in go2.xml is sphere-swept, which is what makes this cheap enough to impose
+# at every knot: `p_z(q) >= r`.
+#
+# All four legs share one entry per kind (asserted by the generator). The y column is carried
+# for completeness and is unused by the z constraint -- with quat_x = quat_z = 0 the base has
+# pitch only, so a body point's world z does not depend on its y. That same fact is why +-y
+# mirror pairs collapse to a single witness point here.
+COLLISION_SPHERES = {
+    "base": np.array([
+        (-0.18810, -0.04675, +0.05700, 0.00000),
+        (+0.18810, -0.04675, +0.05700, 0.00000),
+        (+0.28500, +0.00000, +0.05500, 0.05000),
+        (+0.28500, +0.00000, -0.03500, 0.05000),
+        (-0.18810, -0.04675, -0.05700, 0.00000),
+        (+0.18810, -0.04675, -0.05700, 0.00000),
+        (+0.29300, +0.00000, -0.06000, 0.04700),
+    ]),
+    "hip": np.array([
+        (+0.00000, +0.06000, +0.00000, 0.04600),
+    ]),
+    "thigh": np.array([
+        (-0.01700, -0.01225, -0.00000, 0.00000),
+        (+0.01700, -0.01225, -0.00000, 0.00000),
+        (-0.01700, -0.01225, -0.21300, 0.00000),
+        (+0.01700, -0.01225, -0.21300, 0.00000),
+    ]),
+    "calf": np.array([
+        (+0.00066, +0.00000, -0.01394, 0.01300),
+        (+0.01934, +0.00000, -0.10606, 0.01300),
+        (+0.02107, +0.00000, -0.12653, 0.01100),
+        (+0.01893, +0.00000, -0.16947, 0.01100),
+        (-0.00200, +0.00000, -0.21300, 0.02200),
+    ]),
+}
+
+
+# The tuck the flip actually has to hold, as a hard window on the middle of the flight phase.
+# TUCK_BOX above only says "not self-colliding", which near-full extension satisfies, and
+# nothing else in the cost rewards folding up -- so the optimizer left the legs sprawled at
+# I_yy = 0.66 kg.m^2, WORSE than simply standing (0.48), and had to buy the resulting slow
+# rotation with a 0.57 m CoM rise. Holding this window instead puts I_yy at 0.45-0.46, which
+# is a 0.27 m rise for the same angular momentum -- the tuck is what makes the flip cheap.
+# Wide enough to leave the solver real freedom; TUCK_LEGS sits comfortably inside it.
+FLIGHT_TUCK = {
+    "thigh": (1.30, 2.90),
+    "calf": (-2.72, -2.00),
 }
