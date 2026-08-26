@@ -66,15 +66,19 @@ class Guess:
         self.plant = plant
         self.ctx = plant.CreateDefaultContext()
         self.frames = {f: plant.GetFrameByName(f"{f}_calf") for f in K.FEET}
-        self.P = K.P_FOOT.reshape(3, 1)
+        # Sphere centre, not K.P_FOOT -- same contact convention as program.py's _Kin, so
+        # place()/footholds() put the feet exactly where the NLP's pin will want them.
+        self.P = K.P_ANKLE.reshape(3, 1)
         self.mass = plant.CalcTotalMass(self.ctx)
         q0 = K.mj_to_drake_q(K.mj_qpos(K.HOME_LEGS, K.STAND_BASE_HEIGHT))
         self.home_feet = {f: self.foot(q0, f) for f in K.FEET}
 
     def foot(self, q, f):
+        """Lowest point of the foot sphere -- the point that rests on a flat floor."""
         self.plant.SetPositions(self.ctx, q)
-        return self.plant.CalcPointsPositions(
+        centre = self.plant.CalcPointsPositions(
             self.ctx, self.frames[f], self.P, self.plant.world_frame()).ravel()
+        return centre - np.array([0.0, 0.0, K.R_FOOT])
 
     def place(self, theta, leg_q, pivot, target):
         """q with the base placed so that `pivot` foot sits exactly on `target`."""
@@ -97,7 +101,10 @@ class Guess:
                                HOME_LEG + (LAUNCH_LEGS_REAR - HOME_LEG) * t),
                           pivot, target)
 
-    RAMP = 0.3
+    # Fraction of flight spent folding in / extending out again. Must be <= program.py's
+    # TUCK_RAMP as a fraction of the flight knots (6/26 = 0.23), or the guess starts outside
+    # the hard tuck window at exactly the knots that window covers.
+    RAMP = 0.2
 
     def _flight_path(self, t, z0, x0, vz, tf):
         tt = t * tf
@@ -243,8 +250,13 @@ class Guess:
         return self.plant.MapQDotToVelocity(self.ctx, qd)
 
     def _jac(self, foot):
+        """Jacobian of the material point at the contact, matching program.py's _Kin.jac."""
+        frame = self.frames[foot]
+        R_CW = self.plant.CalcRelativeRotationMatrix(
+            self.ctx, frame, self.plant.world_frame()).matrix()
+        p_contact = K.P_ANKLE - K.R_FOOT * (R_CW @ np.array([0.0, 0.0, 1.0]))
         return self.plant.CalcJacobianTranslationalVelocity(
-            self.ctx, JacobianWrtVariable.kV, self.frames[foot], self.P,
+            self.ctx, JacobianWrtVariable.kV, frame, p_contact.reshape(3, 1),
             self.plant.world_frame(), self.plant.world_frame())
 
     def _contact_force(self, contacts, lam):

@@ -9,14 +9,14 @@ that approximation. If it is large, raise the stance knot count before anything 
 from __future__ import annotations
 
 import numpy as np
-from pydrake.multibody.tree import JacobianWrtVariable
+from pydrake.multibody.tree import BodyIndex, JacobianWrtVariable
 from pydrake.systems.analysis import Simulator
 from pydrake.systems.framework import DiagramBuilder
 from pydrake.systems.primitives import ConstantVectorSource, TrajectorySource
 
 from go2_backflip import constants as K
-from program import make_plant, XQ, XV
-from schedule import FLIGHT
+from program import make_plant, TUCK_RAMP, XQ, XV
+from schedule import FLIGHT, PHASES
 
 G = 9.81
 RESULTS: list[tuple[str, bool, str]] = []
@@ -113,6 +113,60 @@ def check_envelope(phases):
            f"worst overshoot {worst:.2e} N.m")
 
 
+def check_floor(plant, phases):
+    """No collision geom below the floor, over ALL FOUR legs.
+
+    The program only constrains the base and the left legs, leaning on the enforced sagittal
+    symmetry for the right ones -- so this deliberately checks all four, and any leak in that
+    assumption shows up here rather than silently.
+
+    This check exists because its absence hid a large defect: a trajectory that passed 4/6
+    audit checks was driving the rear thigh 69 mm and the head 72 mm through the ground. The
+    optimizer had no geometry beyond four contact points, and neither did the audit.
+    """
+    ctx = plant.CreateDefaultContext()
+    spec = [("base", K.COLLISION_SPHERES["base"])] + [
+        (f"{leg}_{kind}", K.COLLISION_SPHERES[kind])
+        for leg in K.FEET for kind in ("hip", "thigh", "calf")]
+    frames = [(b, plant.GetFrameByName(b), np.ascontiguousarray(pts[:, :3].T), pts[:, 3])
+              for b, pts in spec]
+    worst, where = 0.0, ""
+    for ph in phases:
+        for t, x in zip(ph["t"], ph["x"]):
+            plant.SetPositions(ctx, x[XQ])
+            for name, fr, P, r in frames:
+                pen = float((r - plant.CalcPointsPositions(ctx, fr, P, plant.world_frame())[2]).max())
+                if pen > worst:
+                    worst, where = pen, f"{name} at t={t:.3f}s in {ph['name']}"
+    # 2 mm, not zero: a stance foot's own witness sphere IS the contact, and its pin is a
+    # TIGHT (1e-4) box that the solve satisfies only to its own achieved violation.
+    report("no geometry below the floor", worst < 2e-3,
+           f"worst penetration {worst * 1000:+.2f} mm" + (f" -- {where}" if worst > 0 else ""))
+
+
+def check_tuck(plant, phases):
+    """The flip has to actually tuck: report peak flight I_yy about the CoM.
+
+    Untucked flight is not a cosmetic complaint -- it is what sets the jump. At the sprawled
+    I_yy = 0.66 kg.m^2 this trajectory used to hold, the same angular momentum needs 0.68 s to
+    turn 4.36 rad, which is a 0.57 m CoM rise; tucked (0.45) it is 0.47 s and 0.27 m.
+    """
+    ph = phases[FLIGHT]
+    ctx = plant.CreateDefaultContext()
+    bodies = [BodyIndex(i) for i in range(1, plant.num_bodies())]
+    lo, hi = TUCK_RAMP, PHASES[FLIGHT].n_knots - TUCK_RAMP
+    worst = 0.0
+    for x in ph["x"][lo:hi]:
+        plant.SetPositions(ctx, x[XQ])
+        com = plant.CalcCenterOfMassPositionInWorld(ctx)
+        M = plant.CalcSpatialInertia(ctx, plant.world_frame(), bodies)
+        worst = max(worst, M.Shift(com).CalcRotationalInertia().CopyToFullMatrix3()[1, 1])
+    # 0.55 sits between a real tuck (0.45) and merely standing there (0.48 -> 0.66 sprawled).
+    report("flight is genuinely tucked", worst < 0.55,
+           f"peak I_yy over the tucked knots {worst:.4f} kg.m^2 "
+           f"(tuck pose {0.452:.3f}, standing {0.484:.3f})")
+
+
 def check_integration(bp, result, phases):
     """Roll each phase forward with a tight integrator on the solver's own input trajectory."""
     worst_q, worst_v = 0.0, 0.0
@@ -147,6 +201,8 @@ def run(bp, result, phases) -> bool:
     check_ballistic(plant, phases)
     check_contact(phases)
     check_envelope(phases)
+    check_floor(plant, phases)
+    check_tuck(plant, phases)
     check_integration(bp, result, phases)
     failed = [n for n, ok, _ in RESULTS if not ok]
     print(f"  {len(RESULTS) - len(failed)}/{len(RESULTS)} audit checks passed"

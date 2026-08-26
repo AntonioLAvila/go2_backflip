@@ -26,11 +26,20 @@ from schedule import PHASES, FLIGHT, IMPACT
 
 NQ, NV, NU, NX = 19, 18, 12, 37
 XQ, XV = slice(0, NQ), slice(NQ, NX)          # blocks of a 37-state
-P_FOOT_COL = K.P_FOOT.reshape(3, 1)
+P_ANKLE_COL = K.P_ANKLE.reshape(3, 1)
+Z_W = np.array([0.0, 0.0, 1.0])
+
+# Base + the two sagittally-distinct legs. The right legs are redundant: the NLP pins the hips
+# and mirrors thigh/calf to within TIGHT, so their world z differs from the left by tens of
+# microns. audit.py checks all four anyway, so a leak in that assumption cannot pass silently.
+CLEARANCE_BODIES = ([("base", K.COLLISION_SPHERES["base"])]
+                    + [(f"{leg}_{kind}", K.COLLISION_SPHERES[kind])
+                       for leg in ("FL", "RL") for kind in ("hip", "thigh", "calf")])
 
 FOOT_CLEARANCE = 0.02
 BASE_Z_MIN = 0.20        # torso half-diagonal is 0.196 m, so this clears the floor at any pitch
 WY_MAX = 20.0            # rad/s; also keeps the per-step half-angle far from the pi that aliases
+TUCK_RAMP = 6            # flight knots at each end left free to fold in / extend out again
 X_LAND_MAX = 0.15
 LAMBDA_SCALE = 200.0
 
@@ -78,15 +87,63 @@ class _Kin:
         plant.SetPositions(ctx, q)
         return plant, ctx, self.frames["ad" if ad else "f"]
 
+    # The foot is a 22 mm SPHERE. K.P_FOOT -- its bottom, body-fixed -- is the point touching a
+    # flat floor only while the calf is vertical, and the calf is tilted 51.6 deg at HOME and
+    # past 90 deg at launch. Pinning it buries the sphere by R*(1 - cos tilt): 8.3 mm standing,
+    # 28 mm at launch, measured on the trajectory this replaced. Both methods below therefore
+    # work off the sphere instead.
+
     @staticmethod
     def pos(plant, ctx, frame):
-        return plant.CalcPointsPositions(ctx, frame, P_FOOT_COL, plant.world_frame()).ravel()
+        """World position of the foot sphere's lowest point -- the centre, R below in world z.
+
+        Exact for a flat floor and cheap: the offset is along world z whatever the calf does,
+        so no rotation matrix is needed here.
+        """
+        centre = plant.CalcPointsPositions(ctx, frame, P_ANKLE_COL, plant.world_frame()).ravel()
+        return centre - K.R_FOOT * Z_W
 
     @staticmethod
     def jac(plant, ctx, frame):
+        """Translational Jacobian of the calf's MATERIAL point currently at the contact.
+
+        Not the centre's: the contact force acts R below it, and a friction force through the
+        centre instead leaves a spurious moment of |f_x|*R ~ 2.5 N.m about the knee, ~5% of its
+        45 N.m limit. The material point is q-dependent (it slides around the sphere as the
+        calf rotates), which is fine -- at any instant it is a rigidly-attached point, so this
+        is exactly the Jacobian the applied force needs, and autodiff differentiates through
+        the q-dependence correctly.
+        """
+        R_CW = plant.CalcRelativeRotationMatrix(ctx, frame, plant.world_frame()).matrix()
+        p_contact = K.P_ANKLE - K.R_FOOT * (R_CW @ Z_W)
         return plant.CalcJacobianTranslationalVelocity(
-            ctx, JacobianWrtVariable.kV, frame, P_FOOT_COL,
+            ctx, JacobianWrtVariable.kV, frame, p_contact.reshape(3, 1),
             plant.world_frame(), plant.world_frame())
+
+
+class _Floor:
+    """Floor clearance for every collision geom, over one plant/context pair.
+
+    One witness sphere per geom feature (tools/clearance_points.py generates and verifies the
+    table): the union contains the geoms, so `p_z(q) >= r` for every witness point keeps the
+    whole robot above the floor. Same one-context-per-constraint rule as _Kin.
+    """
+
+    def __init__(self, plant, plant_ad):
+        self.f, self.ad = plant, plant_ad
+        self.cf, self.ca = plant.CreateDefaultContext(), plant_ad.CreateDefaultContext()
+        self.spec = [(plant.GetFrameByName(b), plant_ad.GetFrameByName(b),
+                      np.ascontiguousarray(pts[:, :3].T), pts[:, 3])
+                     for b, pts in CLEARANCE_BODIES]
+        self.radii = np.concatenate([r for *_, r in self.spec])
+
+    def slack(self, q):
+        ad = q.dtype == object
+        plant, ctx = (self.ad, self.ca) if ad else (self.f, self.cf)
+        plant.SetPositions(ctx, q)
+        z = [plant.CalcPointsPositions(ctx, fr_ad if ad else fr_f, P, plant.world_frame())[2]
+             for fr_f, fr_ad, P, _ in self.spec]
+        return np.concatenate(z) - self.radii
 
 
 class BackflipProgram:
@@ -122,6 +179,7 @@ class BackflipProgram:
         self._add_actuator_limits()
         self._add_symmetry()
         self._add_clearance()
+        self._add_body_clearance()
         self._add_stitching()
         self._add_boundary()
         self._scale()
@@ -278,6 +336,21 @@ class BackflipProgram:
             q = self.state(FLIGHT, k)[XQ]
             self.prog.AddBoundingBoxConstraint(lo, hi, [q[8], q[9], q[14], q[15]])
 
+        # ...and, over the middle of the flight, actually TUCK. TUCK_BOX only asserts "not
+        # self-colliding", which near-full extension satisfies, so on its own it let the
+        # optimizer hold both knees against their straightest edge for the entire flip:
+        # I_yy = 0.66 kg.m^2, worse than standing (0.48), bought with a 0.57 m CoM rise. Inside
+        # this window I_yy is 0.45-0.46, which is a 0.27 m rise for the same angular momentum.
+        # Strictly inside TUCK_BOX, so the two never conflict. The first and last TUCK_RAMP
+        # knots stay free: the rear leg leaves the ground extended and has to fold, and both
+        # legs have to come back out for the landing.
+        t_lo, t_hi = K.FLIGHT_TUCK["thigh"]
+        c_lo, c_hi = K.FLIGHT_TUCK["calf"]
+        for k in range(TUCK_RAMP, PHASES[FLIGHT].n_knots - TUCK_RAMP):
+            q = self.state(FLIGHT, k)[XQ]
+            self.prog.AddBoundingBoxConstraint([t_lo, c_lo, t_lo, c_lo], [t_hi, c_hi, t_hi, c_hi],
+                                               [q[8], q[9], q[14], q[15]])
+
     @staticmethod
     def _mirror_contact_pairs(ph):
         idx = {f: i for i, f in enumerate(ph.contacts)}
@@ -305,6 +378,26 @@ class BackflipProgram:
                 for k in range(ph.n_knots):
                     self.prog.AddBoundingBoxConstraint(
                         BASE_Z_MIN, np.inf, self.state(p, k)[XQ][6])
+
+    # --- floor clearance for everything that is not a foot ------------------
+    def _add_body_clearance(self):
+        """No collision geom below the floor, at any knot of any phase.
+
+        Without this the program's only geometric knowledge of the robot is four contact
+        points, and the rest of it sweeps straight through the ground -- the trajectory this
+        replaced put the rear thigh 69 mm and the head 72 mm under the floor while passing
+        every audit check, because the audit could not see it either.
+
+        Lower bound is exactly 0, not a margin: a stance foot's own witness sphere IS the
+        contact, so any positive margin would contradict the foot pin.
+        """
+        n = len(_Floor(self.plant, self.plant_ad).radii)
+        for p, ph in enumerate(PHASES):
+            for k in range(ph.n_knots):
+                floor = _Floor(self.plant, self.plant_ad)
+                self.prog.AddConstraint(
+                    floor.slack, np.zeros(n), np.full(n, np.inf), self.state(p, k)[XQ],
+                    description=f"floor_{ph.name}_{k}")
 
     # --- phase stitching and the touchdown impulse -------------------------
     def _add_stitching(self):
@@ -381,7 +474,7 @@ class BackflipProgram:
             self.prog.SetVariableScaling(var, LAMBDA_SCALE * 0.1)
 
     # --- cost ----------------------------------------------------------------
-    def add_cost(self, w_torque=1.0, w_rate=0.1, w_time=1.0):
+    def add_cost(self, w_torque=1.0, w_rate=0.1, w_time=1.0, w_tuck=0.5):
         inv = 1.0 / K.torque_limits() ** 2
         for p, ph in enumerate(PHASES):
             h = self.dc[p].time_step(0)[0]
@@ -392,3 +485,13 @@ class BackflipProgram:
                        for k in range(ph.n_knots - 1) for j in range(NU))
             self.prog.AddCost(w_rate * rate)
             self.prog.AddCost(w_time * (ph.n_knots - 1) * h)
+
+        # Pull the tucked knots toward TUCK_LEGS rather than letting them sit anywhere in the
+        # window. The hard window guarantees the inertia; this makes the solver settle inside
+        # it instead of riding an edge, and keeps the fold smooth. TUCK_LEGS is the deepest
+        # pose tools/tuck_box.py cleared, so pulling toward it is pulling toward minimum I_yy.
+        tgt = (K.TUCK_LEGS[1], K.TUCK_LEGS[2])
+        tuck = sum((self.state(FLIGHT, k)[XQ][j] - t) ** 2
+                   for k in range(TUCK_RAMP, PHASES[FLIGHT].n_knots - TUCK_RAMP)
+                   for j, t in ((8, tgt[0]), (9, tgt[1]), (14, tgt[0]), (15, tgt[1])))
+        self.prog.AddCost(w_tuck * tuck)

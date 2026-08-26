@@ -119,13 +119,11 @@ TUCK_BASE_HEIGHT = 0.30
 
 # HOME_BASE_HEIGHT is the keyframe value and sits well INTO the floor. This is the height that
 # rests HOME_LEGS on it, and it is what the trajectory optimization must start and end from.
-# NOT YET CORRECTED, deliberately. Measured to P_FOOT, this rests the foot SPHERE 8.3 mm
-# INTO the floor, because the calf is tilted 51.6 deg at HOME (see R_FOOT above) -- so the
-# trajectory starts and ends with the feet already through the ground. The corrected value is
-# 0.2883725003026, but it is only consistent once program.py pins the sphere rather than
-# P_FOOT: changing it alone contradicts the existing foot-pin constraint (base 8.3 mm higher,
-# foot still pinned to z = 0) and makes the NLP infeasible. The two land together.
-STAND_BASE_HEIGHT = 0.2800479196045126
+# Measured to the foot SPHERE, not to P_FOOT. The old P_FOOT-based value (0.2800479196045126)
+# is 8.3 mm too low -- it rests the sphere that far INTO the floor, because the calf is tilted
+# 51.6 deg at HOME (see R_FOOT above) -- so the trajectory used to start and end already
+# penetrating. Only valid together with program.py pinning the sphere rather than P_FOOT.
+STAND_BASE_HEIGHT = 0.2883725003026
 
 
 def mj_qpos(legs: np.ndarray, height: float, quat_wxyz=(1.0, 0.0, 0.0, 0.0)) -> np.ndarray:
