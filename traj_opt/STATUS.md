@@ -71,42 +71,52 @@ single biggest feasibility lever left: it roughly halves the jump the launch has
 
 ### Landed this session
 
+Commit 1 (`1c5fd3e`, diagnosis + inert groundwork):
+
 - `tools/clearance_points.py` (new): generates sphere-swept witness points bounding every
   collision geom in `go2.xml`, grouped per body kind, and **verifies** them against MuJoCo's
   own geom poses over 4000 random sagittal poses (conservative to 1e-16 m). Same idiom as
   `tools/tuck_box.py`.
 - `constants.py`: `R_FOOT`, `P_ANKLE`, `P_FOOT` re-derived from them (numerically unchanged),
-  plus the generated `COLLISION_SPHERES` table and a `FLIGHT_TUCK` window. **All of these are
-  inert** — nothing reads them yet, so the program builds and solves exactly as before
-  (4934 vars, 2902 constraints, unchanged).
-- `STAND_BASE_HEIGHT` is deliberately **left at the old, wrong value** with a comment saying
-  why: raising the base 8.3 mm while the foot pin still targets P_FOOT contradicts the pin and
-  makes the NLP infeasible. It must land in the same commit as the contact-model change.
+  the generated `COLLISION_SPHERES` table, and a `FLIGHT_TUCK` window.
 
-### Not yet done — the actual fix, in order
+Commit 2 (`d9df54c`, the actual fix — all four defects):
 
-1. `program.py` `_Kin.pos/jac`: pin and apply contact force at the foot sphere's **lowest
-   point**, `P_ANKLE − R_FOOT·(R_CW ẑ_W)`, instead of the body-fixed `P_FOOT`. `pos()` becomes
-   `centre_world − R_FOOT·ẑ_W`; `jac()` takes the q-dependent material point so the force is
-   applied where it actually acts (using the centre instead leaves a ~2.5 N·m moment error at
-   the knee, ~5% of its limit). Then flip `STAND_BASE_HEIGHT` to 0.2883725003026 in the same
-   commit.
-2. `program.py` new `_add_body_clearance()`: `p_z(q) ≥ r` for every `COLLISION_SPHERES` witness
-   point at every knot, on the base + `FL_*` + `RL_*` only — 27 points/knot. The right legs are
-   redundant because the NLP pins the hips and mirrors thigh/calf to ±1e-4, so their z differs
-   by tens of microns; the audit should still check all four so any asymmetry leak is caught.
-3. `program.py`: replace the flight `TUCK_BOX` bound with `FLIGHT_TUCK` on the *interior*
-   flight knots (leave a few knots at each end free to retract after takeoff and extend before
-   landing), and add a tuck-tracking term to `add_cost` so the solver settles inside the window
-   rather than riding its edge.
-4. `guess.py`: `self.P` must use the same sphere convention, so `place()`/`footholds()` stay
-   consistent with the new pin.
-5. `audit.py`: add a floor-penetration check over all four legs + base (reuse
-   `COLLISION_SPHERES`), and re-check the tuck. This is what would have caught the whole thing.
-6. **Re-run `nullity_check.py`** — mandatory after any structural change — then re-solve with
-   `--restarts 20 --burst-iters 300` and expect the numbers to move: a real tuck should cut the
-   required CoM rise from ~0.57 m to ~0.27 m, so the previous violation figures are not
-   comparable across this change.
+- **Sphere feet.** `_Kin.pos()` returns the foot sphere's lowest point; `_Kin.jac()` takes the
+  q-dependent *material* point at the contact, so the friction force no longer acts 22 mm above
+  where it should (~2.5 N·m of spurious knee moment). `STAND_BASE_HEIGHT` corrected to
+  0.2883725003026 in the same commit — verified: the guess now puts all four feet at exactly
+  z = 0.
+- **Floor clearance.** New `_add_body_clearance()`: `p_z(q) ≥ r` for 27 witness points at every
+  knot of every phase (base + `FL_*` + `RL_*`; the right legs are redundant under the enforced
+  mirror). Lower bound is exactly 0 — a stance foot's own witness sphere *is* the contact, so
+  any positive margin would contradict the pin.
+- **Real tuck.** `FLIGHT_TUCK` held on the middle flight knots (`TUCK_RAMP = 6` free at each
+  end to fold in and extend out), strictly inside `TUCK_BOX` so they never conflict, plus a
+  `w_tuck` cost pulling toward `TUCK_LEGS` so the solver settles inside the window instead of
+  riding an edge.
+- **Audit.** `check_floor` (all four legs, so the left-leg-only symmetry assumption cannot leak
+  silently) and `check_tuck` (peak flight I_yy, fails above 0.55). 6 checks → 8.
+- `guess.py` follows the same contact convention, and its flight `RAMP` dropped 0.3 → 0.2 to
+  match `TUCK_RAMP` as a fraction of the flight knots.
+
+Verified before solving: `nullity_check.py` = **15/4424**, unchanged from the documented 13 at
+that tolerance — no new LICQ pathology. Program builds at 4934 vars / **2982** constraints
+(+80 = 66 floor + 14 tuck). Guess violation 88.3, in the normal range for the plain analytic
+guess at this size (83.1 before), with worst floor slack exactly 0.00 mm.
+
+### Open
+
+- A 20-restart solve on the new formulation is running (`out/solve_geom.log`). **The previous
+  violation figures are not comparable across this change** — the feasible set is strictly
+  smaller now, and the tuck should change the whole shape of the answer (a ~0.27 m CoM rise
+  instead of ~0.57 m). Judge the result on the 8 audit checks, not on beating 0.0283.
+- The pre-change artifacts are kept for comparison: `out/backflip_prefloor.npz` and
+  `out/checkpoints_prefloor/`.
+- Still open from before, and untouched here: flight angular-momentum drift (0.76%) and the
+  collocation-vs-tight-integrator drift that plateaued at 26 knots (~0.34 rad/s in v). The
+  suspects recorded last session — `load`/`absorb` still on the plain non-single-shot guess at
+  12/16 knots — are unchanged.
 
 ## 2026-08-23 session: audit was half-wrong, and mesh refinement isn't a free lunch
 
