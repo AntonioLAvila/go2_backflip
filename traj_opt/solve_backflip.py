@@ -110,8 +110,16 @@ def max_violation(prog, result) -> float:
     return worst
 
 
+def checkpoint_dir(out: Path) -> Path:
+    """Where a run writes its bursts. Derived from --out so two independent restart searches
+    can run side by side without overwriting each other's checkpoints -- the search is
+    stochastic in practice (see STATUS.md), so a second concurrent run is a real second
+    sample, not a duplicate."""
+    return out.parent / ("checkpoints" if out == OUT else f"checkpoints_{out.stem}")
+
+
 def restart_loop(bp: BackflipProgram, make_opts, solver: str, feas_tol: float, opt_tol: float,
-                  burst_iters: int, n_restarts: int, result):
+                  burst_iters: int, n_restarts: int, result, ckpt_dir: Path):
     """Re-solve in short bursts, chaining forward from each burst's raw result.
 
     Continuous runs reliably wander away from good points once reached (confirmed
@@ -124,7 +132,6 @@ def restart_loop(bp: BackflipProgram, make_opts, solver: str, feas_tol: float, o
     worse one two bursts later.
     """
     best_result, best_viol = result, max_violation(bp.prog, result)
-    ckpt_dir = OUT.parent / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     np.save(ckpt_dir / "burst_start.npy", result.GetSolution(bp.prog.decision_variables()))
 
@@ -178,13 +185,13 @@ def resample(phases):
     return t, x, u
 
 
-def save(t, x, u):
+def save(t, x, u, out: Path = OUT):
     q, v = x[:, XQ], x[:, XV]
     qpos = np.array([K.drake_to_mj_q(qi) for qi in q])
     qvel = np.array([K.drake_to_mj_v(vi, qi[:4]) for qi, vi in zip(q, v)])
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(OUT, t=t, qpos=qpos, qvel=qvel, ctrl=u)
-    print(f"wrote {OUT}  {t.size} samples @ {RATE:g} Hz, {t[-1]:.3f} s")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(out, t=t, qpos=qpos, qvel=qvel, ctrl=u)
+    print(f"wrote {out}  {t.size} samples @ {RATE:g} Hz, {t[-1]:.3f} s")
 
 
 def main() -> int:
@@ -199,6 +206,13 @@ def main() -> int:
                           "forward from each burst's result -- the single biggest lever "
                           "found for this problem so far, see STATUS.md")
     ap.add_argument("--burst-iters", type=int, default=300)
+    ap.add_argument("--from-checkpoint", type=Path, default=None,
+                     help="skip solving: wrap a restart-loop checkpoint (out/checkpoints/*.npy) "
+                          "as a result and run the audit/resample/save pipeline on it. Lets a "
+                          "good point from a still-running solve be replayed and audited "
+                          "without waiting for, or disturbing, that run -- pair it with --out")
+    ap.add_argument("--out", type=Path, default=OUT,
+                     help="where to write the trajectory (default traj_opt/out/backflip.npz)")
     ap.add_argument("--warm-start", type=str, default=None,
                      help="traj_opt/warm_start.py-exported .npz to seed the guess from "
                           "(a resampled prior solve/checkpoint) instead of guess.py's "
@@ -207,6 +221,20 @@ def main() -> int:
 
     bp = BackflipProgram()
     print(f"program: {bp.prog.num_vars()} vars, {len(bp.prog.GetAllConstraints())} constraints")
+
+    if args.from_checkpoint:
+        x = np.load(args.from_checkpoint)
+        if x.shape != (bp.prog.num_vars(),):
+            print(f"checkpoint has {x.shape} decision variables, this program has "
+                  f"{bp.prog.num_vars()} -- built from a different schedule/formulation")
+            return 1
+        result = result_from_vector(bp, x)
+        print(f"[{args.from_checkpoint.name}] viol={max_violation(bp.prog, result):.4f}")
+        phases = extract(bp, result)
+        ok = audit.run(bp, result, phases)
+        t, xs, u = resample(phases)
+        save(t, xs, u, args.out)
+        return 0 if ok else 2
 
     if args.warm_start:
         import warm_start
@@ -226,7 +254,8 @@ def main() -> int:
 
     if args.restarts and not result.is_success():
         result = restart_loop(bp, make_opts, args.solver, args.feas_tol, args.opt_tol / 10,
-                               args.burst_iters, args.restarts, result)
+                               args.burst_iters, args.restarts, result,
+                               checkpoint_dir(args.out))
 
     if not result.is_success():
         viol = max_violation(bp.prog, result)
@@ -235,13 +264,13 @@ def main() -> int:
         phases = extract(bp, result)
         audit.run(bp, result, phases)
         t, x, u = resample(phases)
-        save(t, x, u)
+        save(t, x, u, args.out)
         return 1
 
     phases = extract(bp, result)
     ok = audit.run(bp, result, phases)
     t, x, u = resample(phases)
-    save(t, x, u)
+    save(t, x, u, args.out)
     return 0 if ok else 2
 
 

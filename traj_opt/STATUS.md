@@ -1,6 +1,6 @@
 # Backflip trajectory optimization — status
 
-Last updated 2026-08-25. Not yet converged (`is_success()==False`). This is a
+Last updated 2026-08-31. Not yet converged (`is_success()==False`). This is a
 resumption point, not a finished pipeline. Best confirmed result: IPOPT,
 unscaled constraint violation **0.0283**, on the 26-knot-flight problem,
 audited at **4/6 checks passing**.
@@ -17,6 +17,60 @@ audited at **4/6 checks passing**.
 > including to the submodule's own fork remote — the "uncommitted working
 > tree, one accident from data loss" state flagged in the previous note is
 > resolved. See git log for the commit.
+
+## 2026-08-31 session: the geometry fix works — the shipped .npz was just stale
+
+User replayed the trajectory and reported the robot barely tucks. It doesn't: **the file
+being replayed (`out/backflip.npz`) is byte-identical to `out/backflip_prefloor.npz`**, the
+pre-geometry-fix trajectory from 2026-08-23. The 2026-08-25 solve that would have replaced
+it (`out/solve_geom.log`, now `solve_geom_partial1.log`) was killed after ~5 of 20 restarts
+and never got as far as writing an `.npz`. Nothing regressed; the new formulation had simply
+never produced an output file.
+
+**New: `tools/check_npz.py`** measures the saved `.npz` directly in MuJoCo — exact lowest
+point of every collision geom (box/sphere/capsule/cylinder), I_yy about the CoM, net base
+pitch — so "does the thing I'm replaying tuck / clip the floor" is one command instead of an
+inference from the solver's own residuals. It reproduces the 2026-08-25 table exactly on the
+stale file (head −71.6 mm, rear thigh −68.6 mm, I_yy 0.668), which is what validates it.
+
+**New: `solve_backflip.py --from-checkpoint PATH.npy [--out PATH.npz]`** wraps a restart-loop
+checkpoint through the existing `result_from_vector()` and runs the whole
+audit/resample/save pipeline on it, so a good point can be replayed and audited *while* the
+run that produced it is still going. `--out` also picks the checkpoint directory
+(`checkpoint_dir()`), which is what lets two independent restart searches run side by side.
+
+**The killed run's partial best (viol 3.04 — barely feasible) already audits 6/8**, and that
+is the real result of this session: the formulation change did what it was supposed to.
+
+| check | stale `backflip.npz` (viol 0.0283) | geom partial best (viol 3.04) |
+|---|---|---|
+| net rotation | PASS | PASS (−359.9999°) |
+| CoM ballistic | PASS | PASS (0.14 mm) |
+| angular momentum | FAIL 0.76% | FAIL 2.0e-2 drift |
+| friction cone | PASS | PASS |
+| torque envelope | PASS | PASS |
+| floor penetration | **−71.6 mm** | **+0.07 mm** |
+| tuck (peak I_yy, held knots) | **0.668** | **0.508** |
+| collocation vs integrator | FAIL | FAIL (0.06 q / 0.73 v) |
+
+Kept as `out/backflip_geom_partial.npz` — replayable (`uv run traj_opt/replay.py --npz …`)
+but **not** a validated trajectory at viol 3.
+
+One genuinely new defect this exposed: the resampled 500 Hz output dips **4.2 mm** below the
+floor at the rear foot around t = 0.21 s even though every *knot* is clean (audit: +0.07 mm).
+Floor clearance binds at knots only, and the cubic reconstruction sags between them. Small,
+and it will shrink as the solve tightens, but a per-witness-point margin on the non-stance
+knots is the fix if it survives a converged solve.
+
+**Two independent 40-restart searches launched** on the current formulation (the search is
+stochastic in practice, so a second concurrent run is a second sample, not a duplicate):
+
+- A: `--burst-iters 300` → `out/backflip.npz`, `out/checkpoints/`, log `out/solve_geom2.log`
+- B: `--burst-iters 200` → `out/backflip_b.npz`, `out/checkpoints_backflip_b/`, log
+  `out/solve_geom2_b.log`
+
+Both write every burst to disk, so a killed run still leaves its best point behind — check
+those directories with `--from-checkpoint` before launching anything new.
 
 ## 2026-08-25 session: the trajectory clips the floor and never tucks (IN PROGRESS)
 
