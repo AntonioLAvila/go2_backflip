@@ -62,15 +62,56 @@ Floor clearance binds at knots only, and the cubic reconstruction sags between t
 and it will shrink as the solve tightens, but a per-witness-point margin on the non-stance
 knots is the fix if it survives a converged solve.
 
-**Two independent 40-restart searches launched** on the current formulation (the search is
+### Then a second defect of the same family: the stance foot was never held still
+
+`check_npz.py` on that same checkpoint showed the rear foot at −4.6 mm mid-interval while
+every knot was clean (+0.08 mm). Same figure (−4.2 mm) on the viol=3.0 checkpoint: **a
+number that does not move with the violation level is a missing constraint, not solver
+inaccuracy.**
+
+It was. `_add_contact` pinned the foot's *position* at knots and nothing else, so a stance
+foot could sit exactly on the floor at every knot while moving through it — measured on the
+solved checkpoint at **1.375 m/s** (front feet at the load→launch seam), 0.41 m/s at
+takeoff, median 0.0025 elsewhere; the analytic guess does 0.58 m/s through the launch. The
+Hermite cubic between two pinned knots then bulges by `h·|v|/4`, which is the ±4.4 mm.
+
+Fixed by boxing the **vertical velocity of the foot sphere's centre** — exactly `d/dt` of
+the pin already imposed — at every stance knot (`NO_SLIP = 1e-3` m/s, capping the bulge at
+5 µm). Two things worth not re-deriving:
+
+- **Vertical only, and the centre, not the material contact point.** The material point's
+  velocity is the no-slip condition of a *rolling* sphere, whose contact patch travels along
+  the floor; the foothold pin says it doesn't. Imposing both forces `omega_y = 0` at every
+  stance knot — no calf pitch, i.e. no push-off. The first version of this constraint had
+  exactly that bug. Vertically the two agree (`v_mat_z = c_z`), which is also why this is
+  consistent with the touchdown impulse's own no-slip rows.
+- **Boxed, not exact**, for the usual LICQ reason: it *is* the pin's derivative, so the two
+  are dependent by construction. `nullity_check.py` unchanged at **15/4424**.
+
+`audit.check_floor` now samples between knots as well as at them — a knots-only check can
+only ever confirm what the solver already reported, which is how a 4.4 mm floor excursion
+passed an audit written to catch floor excursions.
+
+**Known and NOT fixed: the pin models a foot that spins in place rather than rolls.** With
+the lowest point pinned to a fixed foothold, a pitching calf slides its material contact
+point at `R·omega_y` (~0.7 m/s at takeoff) while the friction force is applied at that same
+sliding point, with nothing tying the force's direction to the slip. The honest model is a
+foothold that translates with the roll. That is a real formulation change (the foothold
+stops being a constant), worth doing before hardware, not before a first converged
+reference.
+
+**Two independent 40-restart searches** on the corrected formulation (the search is
 stochastic in practice, so a second concurrent run is a second sample, not a duplicate):
 
-- A: `--burst-iters 300` → `out/backflip.npz`, `out/checkpoints/`, log `out/solve_geom2.log`
+- A: `--burst-iters 300` → `out/backflip.npz`, `out/checkpoints/`, log `out/solve_noslip_a.log`
 - B: `--burst-iters 200` → `out/backflip_b.npz`, `out/checkpoints_backflip_b/`, log
-  `out/solve_geom2_b.log`
+  `out/solve_noslip_b.log`
 
-Both write every burst to disk, so a killed run still leaves its best point behind — check
-those directories with `--from-checkpoint` before launching anything new.
+The pre-no-slip runs they replaced (best 0.146 / 0.412, both stalled with no improvement for
+~2.5 h) are kept in `out/checkpoints_prenoslip_{a,b}/` with their logs, and are the reference
+for whether the new constraint costs feasibility. Both searches write every burst to disk, so
+a killed run still leaves its best point behind — check those directories with
+`--from-checkpoint` before launching anything new.
 
 ## 2026-08-25 session: the trajectory clips the floor and never tucks (IN PROGRESS)
 
