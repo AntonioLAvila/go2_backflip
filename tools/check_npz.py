@@ -30,7 +30,7 @@ NPZ = Path(__file__).resolve().parents[1] / "traj_opt" / "out" / "backflip.npz"
 FLIGHT_FOOT_Z = 0.005     # a foot this far up is not carrying the robot
 # Fraction of the flight left out at each end when judging the tuck: program.py's own
 # TUCK_RAMP / flight knots, so the same knots are being judged, sampled in time instead.
-RAMP = 6 / 26
+RAMP = 6 / 32
 
 
 def lowest_z(m: mujoco.MjModel, d: mujoco.MjData, g: int) -> float:
