@@ -211,6 +211,13 @@ def main() -> int:
                           "as a result and run the audit/resample/save pipeline on it. Lets a "
                           "good point from a still-running solve be replayed and audited "
                           "without waiting for, or disturbing, that run -- pair it with --out")
+    ap.add_argument("--start-checkpoint", type=Path, default=None,
+                     help="seed the solve from a checkpoint of THIS formulation instead of "
+                          "guess.py, then solve/restart normally. Unlike --warm-start there is "
+                          "no resampling: the vector is used as-is, so it only works at the "
+                          "same knot counts. Give it different --burst-iters than the run that "
+                          "produced it -- IPOPT is deterministic from a fixed start and "
+                          "options, so an identical start reproduces the identical chain")
     ap.add_argument("--out", type=Path, default=OUT,
                      help="where to write the trajectory (default traj_opt/out/backflip.npz)")
     ap.add_argument("--warm-start", type=str, default=None,
@@ -222,13 +229,15 @@ def main() -> int:
     bp = BackflipProgram()
     print(f"program: {bp.prog.num_vars()} vars, {len(bp.prog.GetAllConstraints())} constraints")
 
-    if args.from_checkpoint:
-        x = np.load(args.from_checkpoint)
+    def load_checkpoint(path: Path):
+        x = np.load(path)
         if x.shape != (bp.prog.num_vars(),):
-            print(f"checkpoint has {x.shape} decision variables, this program has "
-                  f"{bp.prog.num_vars()} -- built from a different schedule/formulation")
-            return 1
-        result = result_from_vector(bp, x)
+            raise SystemExit(f"{path}: {x.shape} decision variables, this program has "
+                             f"{bp.prog.num_vars()} -- a different schedule or formulation")
+        return x
+
+    if args.from_checkpoint:
+        result = result_from_vector(bp, load_checkpoint(args.from_checkpoint))
         print(f"[{args.from_checkpoint.name}] viol={max_violation(bp.prog, result):.4f}")
         phases = extract(bp, result)
         ok = audit.run(bp, result, phases)
@@ -236,7 +245,11 @@ def main() -> int:
         save(t, xs, u, args.out)
         return 0 if ok else 2
 
-    if args.warm_start:
+    if args.start_checkpoint:
+        x = load_checkpoint(args.start_checkpoint)
+        bp.prog.SetInitialGuess(bp.prog.decision_variables(), x)
+        print(f"seeded from {args.start_checkpoint.name}")
+    elif args.warm_start:
         import warm_start
         g, footholds, impulse = warm_start.load(args.warm_start)
         set_guess(bp, g, footholds, impulse)
