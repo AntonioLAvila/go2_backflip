@@ -100,6 +100,24 @@ foothold that translates with the roll. That is a real formulation change (the f
 stops being a constant), worth doing before hardware, not before a first converged
 reference.
 
+### Open question #1 answered: flight carries the integration drift, load/absorb do not
+
+`audit.check_integration` now reports **per phase**, not just the worst across all four. On
+the best corrected-formulation checkpoint (viol 0.0376):
+
+| phase | q drift | v drift |
+|---|---|---|
+| load | 1.5e-04 | 1.1e-02 |
+| launch | 3.1e-03 | 5.5e-02 |
+| **flight** | **2.9e-02** | **2.2e-01** |
+| absorb | 6.5e-04 | 6.8e-04 |
+
+Flight carries roughly 10x any other phase. **The standing suspicion was backwards**: the
+next-steps list ranked "extend single-shooting to `load`/`absorb`" highly because those two
+are still on the plain kinematic guess and relatively coarse — they turn out to be the two
+*cleanest* phases. Flight is still the limiting mesh, so 26→32 knots (or a tighter `h_max`)
+is the live lever, and extending single-shooting is not.
+
 **Two independent 40-restart searches** on the corrected formulation (the search is
 stochastic in practice, so a second concurrent run is a second sample, not a duplicate):
 

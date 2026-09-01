@@ -181,7 +181,14 @@ def check_tuck(plant, phases):
 
 
 def check_integration(bp, result, phases):
-    """Roll each phase forward with a tight integrator on the solver's own input trajectory."""
+    """Roll each phase forward with a tight integrator on the solver's own input trajectory.
+
+    Reported per phase, not just as a worst-of: this check and the angular-momentum one moved
+    together for three mesh refinements and then stopped, and knowing WHICH phase carries the
+    drift is what decides whether the next lever is more flight knots or something else
+    entirely (load/absorb are still on the plain kinematic guess, never single-shot).
+    """
+    per_phase = []
     worst_q, worst_v = 0.0, 0.0
     for p, ph in enumerate(phases):
         u_traj = bp.dc[p].ReconstructInputTrajectory(result)
@@ -201,10 +208,13 @@ def check_integration(bp, result, phases):
         sim.Initialize()
         sim.AdvanceTo(ph["t"][-1] - ph["t"][0])
 
-        worst_q = max(worst_q, np.abs(plant.GetPositions(ctx) - ph["x"][-1][XQ]).max())
-        worst_v = max(worst_v, np.abs(plant.GetVelocities(ctx) - ph["x"][-1][XV]).max())
+        dq = float(np.abs(plant.GetPositions(ctx) - ph["x"][-1][XQ]).max())
+        dv = float(np.abs(plant.GetVelocities(ctx) - ph["x"][-1][XV]).max())
+        per_phase.append((ph["name"], dq, dv))
+        worst_q, worst_v = max(worst_q, dq), max(worst_v, dv)
     report("collocation matches a tight integrator", worst_q < 5e-3,
-           f"worst end-of-phase drift {worst_q:.2e} (q), {worst_v:.2e} (v)")
+           f"worst end-of-phase drift {worst_q:.2e} (q), {worst_v:.2e} (v) -- "
+           + ", ".join(f"{n} {q:.1e}/{v:.1e}" for n, q, v in per_phase))
 
 
 def run(bp, result, phases) -> bool:
