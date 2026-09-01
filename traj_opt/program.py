@@ -53,6 +53,23 @@ LAMBDA_SCALE = 200.0
 # indistinguishable from exact.
 TIGHT = 1e-4
 
+# Same idea, for the stance foot's VELOCITY. Pinning only the position, and only at knots, let
+# the foot sit exactly on the floor at every knot while moving through it at ~0.9 m/s: the
+# Hermite cubic between two pinned knots then bulges by h*|v|/4, measured at +-4.4 mm on a
+# 20 ms load interval, alternating sign knot to knot. Nothing saw it -- the audit sampled knots
+# too -- until tools/check_npz.py looked at the resampled output. 1e-3 m/s caps that bulge at
+# 5 um. Boxed, not exact, for the LICQ reason above -- it IS the pin's own derivative, so the
+# two are dependent by construction, and a box keeps that dependence out of the equality rank.
+#
+# The VERTICAL component only, and of the sphere's CENTRE. Vertical is where the bulge is (a
+# horizontal wiggle between two pinned knots leaves no mark on the floor), and it is the one
+# component every other contact condition here already agrees on: the touchdown impulse
+# constrains the MATERIAL point at the contact, whose vertical velocity is the centre's, while
+# horizontally the two differ by R*omega_y -- the rolling term. Constraining that too would
+# assert the sphere neither rolls nor slips, i.e. that the calf does not pitch, which is the
+# opposite of what a push-off does.
+NO_SLIP = 1e-3
+
 # Generous, physically-loose upper bounds -- go2 weighs ~149 N total, so these are 10-25x a
 # static single-foot share, never expected to bind, just there to give IPOPT's interior-point
 # method a finite barrier region on every variable (see the TIGHT comment above).
@@ -102,6 +119,21 @@ class _Kin:
         """
         centre = plant.CalcPointsPositions(ctx, frame, P_ANKLE_COL, plant.world_frame()).ravel()
         return centre - K.R_FOOT * Z_W
+
+    @staticmethod
+    def jac_centre(plant, ctx, frame):
+        """Jacobian of the sphere CENTRE: exactly d/dt of pos(), since pos() offsets the centre
+        by a constant world vector.
+
+        This, not jac() below, is what the stance velocity constraint has to use. jac() is the
+        MATERIAL point at the contact, and holding that still is the no-slip condition of a
+        ROLLING sphere, whose contact patch travels along the floor -- which contradicts a
+        foothold pinned in place. Together the two would force the calf's pitch rate to zero at
+        every stance knot, and the calf pitches through most of a radian on the push-off.
+        """
+        return plant.CalcJacobianTranslationalVelocity(
+            ctx, JacobianWrtVariable.kV, frame, P_ANKLE_COL,
+            plant.world_frame(), plant.world_frame())
 
     @staticmethod
     def jac(plant, ctx, frame):
@@ -240,6 +272,21 @@ class BackflipProgram:
                     g, -eps, eps,
                     np.concatenate([self.state(p, k)[XQ], self.foothold[p].ravel()]),
                     description=f"pin_{ph.name}_{k}")
+
+                # ...and it is not moving there: the exact time derivative of that same pin,
+                # imposed at the same knots. Without it the pin holds only pointwise, and the
+                # cubic between two pinned knots is free to bulge through the floor.
+                kin_v = self._kin(ph.contacts)
+
+                def gv(z, kin=kin_v, nc=nc):
+                    q, v = z[:NQ], z[NQ:]
+                    plant, ctx, frames = kin.at(q)
+                    return np.array([(kin.jac_centre(plant, ctx, fr) @ v)[2] for fr in frames])
+
+                eps_v = NO_SLIP * np.ones(nc)
+                self.prog.AddConstraint(
+                    gv, -eps_v, eps_v, self.state(p, k),
+                    description=f"noslip_{ph.name}_{k}")
 
                 lam = self.lam[p][k]
                 # lambda_y == 0: the motion is sagittal, so a lateral GRF would be a pure

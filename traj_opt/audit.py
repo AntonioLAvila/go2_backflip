@@ -123,6 +123,11 @@ def check_floor(plant, phases):
     This check exists because its absence hid a large defect: a trajectory that passed 4/6
     audit checks was driving the rear thigh 69 mm and the head 72 mm through the ground. The
     optimizer had no geometry beyond four contact points, and neither did the audit.
+
+    Sampled BETWEEN knots, not just at them, for the same reason: the constraints bind at
+    knots, so a knots-only check can only ever confirm what the solver already reported. It
+    hid a second defect that way -- a stance foot pinned to the floor at every knot while
+    moving through it at ~0.9 m/s, bulging the reconstruction +-4.4 mm mid-interval.
     """
     ctx = plant.CreateDefaultContext()
     spec = [("base", K.COLLISION_SPHERES["base"])] + [
@@ -130,18 +135,26 @@ def check_floor(plant, phases):
         for leg in K.FEET for kind in ("hip", "thigh", "calf")]
     frames = [(b, plant.GetFrameByName(b), np.ascontiguousarray(pts[:, :3].T), pts[:, 3])
               for b, pts in spec]
-    worst, where = 0.0, ""
+    worst = {True: (0.0, ""), False: (0.0, "")}          # keyed by "is a knot"
     for ph in phases:
-        for t, x in zip(ph["t"], ph["x"]):
-            plant.SetPositions(ctx, x[XQ])
+        fine = np.sort(np.concatenate(
+            [ph["t"], *(ph["t"][:-1] + f * np.diff(ph["t"]) for f in (0.25, 0.5, 0.75))]))
+        knots = set(ph["t"])
+        for t in fine:
+            plant.SetPositions(ctx, ph["traj"].value(t - ph["t0"]).ravel()[XQ])
             for name, fr, P, r in frames:
                 pen = float((r - plant.CalcPointsPositions(ctx, fr, P, plant.world_frame())[2]).max())
-                if pen > worst:
-                    worst, where = pen, f"{name} at t={t:.3f}s in {ph['name']}"
+                at_knot = t in knots
+                if pen > worst[at_knot][0]:
+                    worst[at_knot] = (pen, f"{name} at t={t:.3f}s in {ph['name']}")
     # 2 mm, not zero: a stance foot's own witness sphere IS the contact, and its pin is a
     # TIGHT (1e-4) box that the solve satisfies only to its own achieved violation.
-    report("no geometry below the floor", worst < 2e-3,
-           f"worst penetration {worst * 1000:+.2f} mm" + (f" -- {where}" if worst > 0 else ""))
+    (knot_pen, knot_where), (mid_pen, mid_where) = worst[True], worst[False]
+    report("no geometry below the floor", max(knot_pen, mid_pen) < 2e-3,
+           f"worst penetration {knot_pen * 1000:+.2f} mm at knots"
+           + (f" ({knot_where})" if knot_pen > 0 else "")
+           + f", {mid_pen * 1000:+.2f} mm between them"
+           + (f" ({mid_where})" if mid_pen > 0 else ""))
 
 
 def check_tuck(plant, phases):
