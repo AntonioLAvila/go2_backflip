@@ -1,16 +1,17 @@
 # Backflip trajectory optimization — status
 
-Last updated 2026-08-31. Not yet converged (`is_success()==False`). This is a
-resumption point, not a finished pipeline. Best confirmed result: IPOPT,
-unscaled constraint violation **0.0283**, on the 26-knot-flight problem,
-audited at **4/6 checks passing**.
+Last updated 2026-09-01. Not yet converged (`is_success()==False`), and it may
+never need to be — see next steps. Best confirmed result: IPOPT, unscaled
+constraint violation **0.0376**, on the 26-knot-flight problem, audited at
+**6/8 checks passing**, shipped as `out/backflip.npz` and reproducible from
+`out/checkpoints/best.npy` with `--from-checkpoint`.
 
-> **Read the 2026-08-25 section FIRST.** That 4/6 result is not usable as an RL
-> reference: visual review found, and measurement confirmed, that it drives the
-> rear thigh 69 mm and the head 72 mm through the floor, and never tucks. The
-> audit passed it because the audit has no floor check and the NLP has no
-> geometry beyond four point-feet. Work on that is **in progress and only
-> partly landed** — see the checklist there before touching anything.
+> **Read the 2026-09-01 section FIRST.** It supersedes the 2026-08-25 one: the
+> floor clipping and the missing tuck are fixed and measured (−71.6 mm → −0.2 mm,
+> I_yy 0.668 → 0.509), a second defect of the same family (a stance foot pinned
+> in place but free to move through the floor at 1.4 m/s) was found and fixed,
+> and three separate levers were tried and found not to work. The 2026-08-25
+> section's "in progress" checklist is done.
 
 > **2026-08-20 note:** everything in this repo (`tools/`, `traj_opt/`, this
 > file, and the `go2_mjcf` submodule fix) is now committed and pushed,
@@ -18,7 +19,7 @@ audited at **4/6 checks passing**.
 > tree, one accident from data loss" state flagged in the previous note is
 > resolved. See git log for the commit.
 
-## 2026-08-31 session: the geometry fix works — the shipped .npz was just stale
+## 2026-09-01 session: the geometry fix works — the shipped .npz was just stale
 
 User replayed the trajectory and reported the robot barely tucks. It doesn't: **the file
 being replayed (`out/backflip.npz`) is byte-identical to `out/backflip_prefloor.npz`**, the
@@ -115,8 +116,9 @@ the best corrected-formulation checkpoint (viol 0.0376):
 Flight carries roughly 10x any other phase. **The standing suspicion was backwards**: the
 next-steps list ranked "extend single-shooting to `load`/`absorb`" highly because those two
 are still on the plain kinematic guess and relatively coarse — they turn out to be the two
-*cleanest* phases. Flight is still the limiting mesh, so 26→32 knots (or a tighter `h_max`)
-is the live lever, and extending single-shooting is not.
+*cleanest* phases. Extending single-shooting to them is therefore not the lever it was
+ranked as. Growing the flight mesh was the obvious follow-up — and it does not work either;
+see the negative results below.
 
 **Two independent 40-restart searches** on the corrected formulation (the search is
 stochastic in practice, so a second concurrent run is a second sample, not a duplicate):
@@ -130,6 +132,48 @@ The pre-no-slip runs they replaced (best 0.146 / 0.412, both stalled with no imp
 for whether the new constraint costs feasibility. Both searches write every burst to disk, so
 a killed run still leaves its best point behind — check those directories with
 `--from-checkpoint` before launching anything new.
+
+### Result: 0.0376 at 26 knots, 6/8 — the best trajectory the project has produced
+
+Run A completed all 40 restarts at **viol 0.0376** and wrote `out/backflip.npz`. Run B
+completed at 0.0510 and never beat its own burst-2 point in the 38 bursts after it.
+
+| audit check | pre-geometry best (0.0283) | now (0.0376) |
+|---|---|---|
+| net rotation | PASS | PASS (−359.9998°) |
+| CoM ballistic | PASS 0.21 mm | PASS **0.05 mm** |
+| angular momentum | FAIL 0.76% | FAIL **0.56%** |
+| friction cone | PASS | PASS |
+| torque envelope | PASS | PASS |
+| floor penetration | **−71.6 mm** | **−0.06 mm** knots / **−0.24 mm** between |
+| tuck (peak I_yy held) | **0.668** | **0.509** |
+| collocation vs integrator | FAIL 0.037/0.34 | FAIL **0.029/0.219** |
+
+Better on every metric than the old best, on a strictly *smaller* feasible set (floor
+clearance + hard tuck + no-slip all added since). Confirmed independently on the written
+`.npz` by `tools/check_npz.py`: worst penetration 0.2 mm, held I_yy 0.509.
+
+### Three negative results, all worth not repeating
+
+1. **`--start-checkpoint` continuation didn't help here.** A fresh 40-restart chain seeded
+   from the 0.0376 point (different `--burst-iters`, so a different chain) ran to completion
+   at **0.0688** and never beat its own seed. Consistent with the older finding that good
+   points are transient under continued iteration — a *new* chain from a good point is no
+   more likely to stay near it than any other chain.
+2. **Flight 26→32 knots is worse, not better.** Despite the per-phase result above pointing
+   at flight, growing it stalled at **2.13** after 26 bursts — ~50x worse than 26 knots at
+   the same stage, with no improvement over the last hour of it. `h_max` was tightened
+   0.032→0.026 in the same step so the new knots couldn't just bunch up; nullity was clean
+   (16/4796). **Reverted to 26 knots**, which stays the shipped configuration.
+3. **Warm-starting that 32-knot problem from the 0.0376 26-knot solution didn't rescue it**
+   either: iteration-0 infeasibility 418 vs the analytic guess's 360, and it stalled at
+   **2.35**. This was the one untested case the previous session flagged (warm-starting from
+   a genuinely smooth, well-resolved source) — it now has an answer, and it is the same
+   answer as every other mesh transition: `guess.py`'s single-shooting is the better start.
+
+So the flight mesh is not simply under-resolved — 26 knots is where this transcription's
+feasibility and its discretization error balance, and pushing either side of that loses.
+The remaining two failures are small and shrinking, and the next lever is not knot count.
 
 ## 2026-08-25 session: the trajectory clips the floor and never tucks (IN PROGRESS)
 
@@ -736,31 +780,29 @@ option-name strings in `libdrake.so`.
 
 ## Concrete next steps, in order of expected payoff
 
-1. **Figure out why integration-vs-collocation drift plateaued at 26 knots**
-   (0.33→0.34 rad/s in v, flat) while angular momentum kept improving
-   (1.16%→0.76%) — these two checks moved together at every step before now,
-   so something else is now the limiting factor. Prime suspects: `load`/
-   `absorb` are still on the plain kinematic guess (never single-shot) and
-   are relatively coarse (12/16 knots) — growing *those*, or extending
-   single-shooting to them (next-ranked item below), may matter more than
-   further flight knots at this point. Also worth isolating which PHASE's
-   `check_integration` drift dominates (it currently only reports the worst
-   across all four phases) before assuming it's still flight.
-2. If flight is still the bottleneck once (1) is checked, growing **26→32**
-   is the mesh-refinement move, and unlike the 14→20/20→26 transitions,
-   `warm_start.py` may finally be worth another look now that 26 knots is a
-   well-resolved, 4/6-passing source (though 20→26 with `warm_start.py` was
-   not tried directly — the plain analytic guess was used for both 14→20 and
-   20→26, and won both times against warm-starting from the *previous* good
-   checkpoint. Not yet tested: warm-starting a phase from a checkpoint at
-   the SAME resolution, i.e. using the 26-knot result to seed a fresh
-   26-knot restart search, instead of re-deriving the analytic guess from
-   scratch each time).
-3. **Extend single-shooting to `load`/`absorb`** — see (1), this may now be
-   higher-payoff than previously ranked, given the plateau.
-4. Run `traj_opt/nullity_check.py` again after any further `program.py` or
-   `schedule.py` change — cheap (~1 min), and it's what found bugs 1-3.
-   Already re-run clean (13/4424) after the 20→26 knot growth.
+All four items below replace the previous list, every entry of which has now been
+answered: (1) which phase carries the drift — flight, not `load`/`absorb`; (2) 26→32
+knots — worse, reverted; (3) `warm_start.py` from a well-resolved source — still loses
+to the analytic guess; (4) nullity after each change — done, 15/4424 and 16/4796.
+
+1. **The two remaining audit failures are both flight-side and both small**
+   (angular momentum 0.56%, integration drift 0.029 q / 0.219 v). Knot count is
+   spent as a lever. What has never been tried: the transcription itself — the
+   first-order hold on *generalized force* means the contact term at a collocation
+   point is the average of the endpoints' `J^T lambda` rather than
+   `J(q_col)^T lambda_col`, which `audit.check_integration` prices but nothing
+   fixes. Flight is contact-free, so there it reduces to the FOH on torque alone.
+2. **The foot rolls; the pin says it spins in place.** See the 2026-08-31 section —
+   a pitching calf slides its material contact point at `R*omega_y` (~0.7 m/s at
+   takeoff) with nothing tying the friction force's direction to that slip. Making
+   the foothold translate with the roll is the honest model and the last known
+   *modelling* error, as opposed to discretization error, in the stance phases.
+3. **A converged `is_success()` is still out of reach and may not be worth chasing** —
+   the dual infeasibility at these points is ~1e6, i.e. nowhere near a certified local
+   optimum, while the primal violation is 0.0376 and every physical check but two
+   passes. For an RL-imitation reference, primal feasibility is what matters.
+4. Run `traj_opt/nullity_check.py` after any `program.py` or `schedule.py` change —
+   cheap, and it is what found bugs 1-3.
 
 ## Files
 
@@ -769,7 +811,8 @@ option-name strings in `libdrake.so`.
 | `src/go2_backflip/constants.py` | shared constants, Drake↔MuJoCo mapping | done, `verify_parity.py` passes 6/6 |
 | `tools/check_envelope.py` | unit check for the linear torque-speed envelope | done, passes |
 | `tools/tuck_box.py` | self-collision-free sagittal joint box (flight only) | done |
-| `traj_opt/schedule.py` | phase table — flight now **26 knots** (grown 14→20→26, 2026-08-23), `h_max` tightened 0.055→0.040→0.032 | — |
+| `traj_opt/schedule.py` | phase table — flight **26 knots** (grown 14→20→26; 32 tried 2026-09-01 and reverted, much worse), `h_max` 0.055→0.040→0.032 | — |
+| `tools/check_npz.py` | geometric review of a saved `.npz`: exact lowest point of every collision geom, flight I_yy, net pitch — measures the file that gets replayed, not the solver's residuals | done; found the stale output and the between-knot floor bulge |
 | `traj_opt/program.py` | the NLP: constraints, all three fixed bugs live here | builds cleanly, nullity 13/4424 at the 26-knot size (was 12/3680 at 14 knots), not yet solved |
 | `traj_opt/nullity_check.py` | FD-Jacobian/SVD LICQ diagnostic — found bugs 1-3 | done, rerun after any constraint-family change |
 | `traj_opt/guess.py` | analytic initial guess, single-shooting launch/flight, knot-count-generic (no changes needed to run at any flight size) | done, best IPOPT result yet at 14 knots (violation 5.7 pre-restart, 0.0298-0.0308 post-restart); at 20 knots starts at violation 83 pre-solve |
