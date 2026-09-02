@@ -15,7 +15,7 @@ from pydrake.systems.framework import DiagramBuilder
 from pydrake.systems.primitives import ConstantVectorSource, TrajectorySource
 
 from go2_backflip import constants as K
-from program import make_plant, TUCK_RAMP, XQ, XV
+from program import BODY_CLEARANCE, make_plant, TUCK_RAMP, XQ, XV
 from schedule import FLIGHT, PHASES
 
 G = 9.81
@@ -135,18 +135,27 @@ def check_floor(plant, phases):
         for leg in K.FEET for kind in ("hip", "thigh", "calf")]
     frames = [(b, plant.GetFrameByName(b), np.ascontiguousarray(pts[:, :3].T), pts[:, 3])
               for b, pts in spec]
+    # Which witness sphere is the foot: it IS the contact, so it alone is allowed to sit at
+    # zero, and it alone is excluded from the margin check below (matching program.py).
+    is_foot = {b: np.logical_and(np.all(np.isclose(pts[:, :3], K.P_ANKLE), axis=1),
+                                 np.isclose(pts[:, 3], K.R_FOOT)) for b, pts in spec}
     worst = {True: (0.0, ""), False: (0.0, "")}          # keyed by "is a knot"
+    gap = {True: (np.inf, ""), False: (np.inf, "")}      # non-foot clearance, same keying
     for ph in phases:
         fine = np.sort(np.concatenate(
             [ph["t"], *(ph["t"][:-1] + f * np.diff(ph["t"]) for f in (0.25, 0.5, 0.75))]))
         knots = set(ph["t"])
         for t in fine:
             plant.SetPositions(ctx, ph["traj"].value(t - ph["t0"]).ravel()[XQ])
+            at_knot = t in knots
             for name, fr, P, r in frames:
-                pen = float((r - plant.CalcPointsPositions(ctx, fr, P, plant.world_frame())[2]).max())
-                at_knot = t in knots
+                slack = plant.CalcPointsPositions(ctx, fr, P, plant.world_frame())[2] - r
+                pen = float((-slack).max())
                 if pen > worst[at_knot][0]:
                     worst[at_knot] = (pen, f"{name} at t={t:.3f}s in {ph['name']}")
+                free = slack[~is_foot[name]]
+                if free.size and free.min() < gap[at_knot][0]:
+                    gap[at_knot] = (float(free.min()), f"{name} at t={t:.3f}s in {ph['name']}")
     # 2 mm, not zero: a stance foot's own witness sphere IS the contact, and its pin is a
     # TIGHT (1e-4) box that the solve satisfies only to its own achieved violation.
     (knot_pen, knot_where), (mid_pen, mid_where) = worst[True], worst[False]
@@ -155,6 +164,19 @@ def check_floor(plant, phases):
            + (f" ({knot_where})" if knot_pen > 0 else "")
            + f", {mid_pen * 1000:+.2f} mm between them"
            + (f" ({mid_where})" if mid_pen > 0 else ""))
+    # Separate from penetration, because clearing the floor by 0.1 mm is not the same as
+    # clearing it. The trajectory this replaced passed the check above while the rear knee
+    # scraped along the ground at launch and the head touched down before the feet did --
+    # visible in replay, invisible to an audit that only looks for a negative number.
+    # Half the margin, not all of it: the bound binds at knots, and the solve satisfies it
+    # only to its own achieved violation, so demanding the full 10 mm would grade the
+    # solver's tolerance rather than the trajectory's geometry.
+    (knot_gap, gap_where), (mid_gap, mid_gap_where) = gap[True], gap[False]
+    report("non-foot geometry keeps its clearance margin",
+           min(knot_gap, mid_gap) > BODY_CLEARANCE / 2,
+           f"closest non-foot approach {knot_gap * 1000:+.2f} mm at knots ({gap_where}), "
+           f"{mid_gap * 1000:+.2f} mm between them ({mid_gap_where}); "
+           f"margin {BODY_CLEARANCE * 1000:.0f} mm")
 
 
 def check_tuck(plant, phases):

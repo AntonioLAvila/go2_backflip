@@ -37,6 +37,16 @@ CLEARANCE_BODIES = ([("base", K.COLLISION_SPHERES["base"])]
                        for leg in ("FL", "RL") for kind in ("hip", "thigh", "calf")])
 
 FOOT_CLEARANCE = 0.02
+# Floor clearance demanded of every witness sphere that is NOT a foot. The foot sphere keeps a
+# bound of exactly 0 -- it IS the contact, so any margin would contradict the stance pin, and
+# its own swing clearance is FOOT_CLEARANCE above. For the rest, 0 is the wrong bound: it is
+# satisfied by grazing, and the optimizer grazes, because nothing rewards a gap. The result
+# passed every check and still looked wrong in replay -- the rear knee scraped the floor for
+# three knots at launch (-0.2 mm) and the head touched down at 0.1 mm before the feet did.
+# 10 mm is ~50x the between-knot reconstruction error (0.05 mm) and ~4x the worst knot
+# violation IPOPT leaves at the tolerance it converges to here, so it is a gap that survives
+# both, and it is the margin the hardware stage will need against tracking error anyway.
+BODY_CLEARANCE = 0.010
 BASE_Z_MIN = 0.20        # torso half-diagonal is 0.196 m, so this clears the floor at any pitch
 WY_MAX = 20.0            # rad/s; also keeps the per-step half-angle far from the pi that aliases
 TUCK_RAMP = 6            # flight knots at each end left free to fold in / extend out again
@@ -168,6 +178,11 @@ class _Floor:
                       np.ascontiguousarray(pts[:, :3].T), pts[:, 3])
                      for b, pts in CLEARANCE_BODIES]
         self.radii = np.concatenate([r for *_, r in self.spec])
+        # Identified by geometry, not by index, so a regenerated table cannot silently move it.
+        foot = [np.logical_and(np.all(np.isclose(pts[:, :3], K.P_ANKLE), axis=1),
+                               np.isclose(pts[:, 3], K.R_FOOT))
+                for _, pts in CLEARANCE_BODIES]
+        self.margin = np.concatenate([np.where(f, 0.0, BODY_CLEARANCE) for f in foot])
 
     def slack(self, q):
         ad = q.dtype == object
@@ -435,15 +450,16 @@ class BackflipProgram:
         replaced put the rear thigh 69 mm and the head 72 mm under the floor while passing
         every audit check, because the audit could not see it either.
 
-        Lower bound is exactly 0, not a margin: a stance foot's own witness sphere IS the
-        contact, so any positive margin would contradict the foot pin.
+        The bound is BODY_CLEARANCE for every witness sphere except the foot's, which keeps
+        exactly 0: a stance foot's own witness sphere IS the contact, so any positive margin
+        there would contradict the foot pin.
         """
-        n = len(_Floor(self.plant, self.plant_ad).radii)
+        lb = _Floor(self.plant, self.plant_ad).margin
         for p, ph in enumerate(PHASES):
             for k in range(ph.n_knots):
                 floor = _Floor(self.plant, self.plant_ad)
                 self.prog.AddConstraint(
-                    floor.slack, np.zeros(n), np.full(n, np.inf), self.state(p, k)[XQ],
+                    floor.slack, lb, np.full(lb.size, np.inf), self.state(p, k)[XQ],
                     description=f"floor_{ph.name}_{k}")
 
     # --- phase stitching and the touchdown impulse -------------------------

@@ -1,12 +1,18 @@
 # Backflip trajectory optimization — status
 
-Last updated 2026-09-01. Not yet converged (`is_success()==False`), and it may
-never need to be — see next steps. Best confirmed result: IPOPT, unscaled
-constraint violation **0.0376**, on the 26-knot-flight problem, audited at
-**6/8 checks passing**, shipped as `out/backflip.npz` and reproducible from
-`out/checkpoints/best.npy` with `--from-checkpoint`.
+Last updated 2026-09-01 (second session that day). Not yet converged
+(`is_success()==False`), and it may never need to be — see next steps. Best
+confirmed result: IPOPT, unscaled constraint violation **0.0495**, on the
+26-knot-flight problem with the 10 mm body-clearance margin, audited at
+**7/9 checks passing**, shipped as `out/backflip.npz` and reproducible from
+`out/checkpoints_backflip_clr_b/best_0495.npy` with `--from-checkpoint`.
+The previous best (0.0376, 6/8, no clearance margin) is kept as
+`out/backflip_noclearance_0376.npz` — it is *better converged* but its rear
+knees scrape the floor and its head touches down before its feet do.
 
-> **Read the 2026-09-01 section FIRST.** It supersedes the 2026-08-25 one: the
+> **Read the 2026-09-01 session B section FIRST**, then the one below it.
+>
+> **Read the 2026-09-01 section next.** It supersedes the 2026-08-25 one: the
 > floor clipping and the missing tuck are fixed and measured (−71.6 mm → −0.2 mm,
 > I_yy 0.668 → 0.509), a second defect of the same family (a stance foot pinned
 > in place but free to move through the floor at 1.4 m/s) was found and fixed,
@@ -18,6 +24,100 @@ constraint violation **0.0376**, on the 26-knot-flight problem, audited at
 > including to the submodule's own fork remote — the "uncommitted working
 > tree, one accident from data loss" state flagged in the previous note is
 > resolved. See git log for the commit.
+
+## 2026-09-01 session B: clearing the floor by a margin, not by a hair
+
+User replayed the shipped trajectory and reported it looked much better, but that the head
+came close to collision on landing and the rear knees collided "just a little". Both were
+real, both were the same bug, and the bug was in a **bound**, not in the solver.
+
+### The defect: `>= 0` is not "does not collide"
+
+`_add_body_clearance` required every one of the 27 witness spheres to satisfy `p_z(q) >= 0`,
+and its docstring defended the zero: a stance foot's witness sphere IS the contact, so any
+positive margin there would contradict the foot pin. That reasoning is correct for the foot
+and wrong for the other 25 spheres, which then had no reason to keep any gap — and the
+optimizer spent every millimetre of gap it was allowed to, exactly where the user saw it:
+
+| | where | when | clearance |
+|---|---|---|---|
+| rear knee | `RL/RR_calf_upper` | t = 0.30–0.31, launch | **−0.2 mm**, three knots running |
+| head | `head_sphere` | t = 1.078, touchdown | **+0.1 mm**, *before* the feet load |
+
+The knee rides the floor while the base pitches back through −40°; the head gets to the
+ground before the feet do. Neither is solver error — both figures are stable across
+checkpoints of very different violation, which is the same tell that identified the no-slip
+defect earlier: **a number that ignores solver accuracy is a missing constraint.**
+
+### The fix
+
+`BODY_CLEARANCE = 0.010` in `program.py`. The bound is now per-sphere: exactly 0 for the two
+foot spheres (they are the contact, and their swing clearance is `FOOT_CLEARANCE` already),
+10 mm for the other 25. The exemption is found **by geometry** (matching `K.P_ANKLE` and
+`K.R_FOOT`), not by row index, so regenerating `COLLISION_SPHERES` with
+`tools/clearance_points.py` cannot silently move it.
+
+10 mm is ~50× the between-knot reconstruction error (0.05 mm) and ~4× the worst knot
+violation IPOPT leaves at the tolerance it converges to here, so it survives both — and it
+is margin the hardware stage needs against tracking error anyway.
+
+`nullity_check.py` is **unchanged at 15/4424** (verified against a stashed baseline, not
+assumed): only an inequality bound moved, so this adds no LICQ risk.
+
+### The matching audit blind spot, also fixed
+
+The audit could only see penetration *below zero*, so "grazes at 0.1 mm" passed — the same
+class of blindness that let the stale file report 4/6 while the head was 72 mm underground.
+Both checkers now report the closest **non-foot** approach as a first-class number:
+`audit.py` gains a ninth check, and `check_npz.py` reports it for the replayed file, where it
+flags the old trajectory `TOO CLOSE  −0.2 mm (RL_calf_upper)`. Without this, a later rerun
+could regress the clearance and still report a clean audit.
+
+### Result: 0.0495 at 7/9 — the clearance is free
+
+Four searches were run on the tightened problem (all `is_success()==False`, as always here):
+
+| chain | seed | budget | best viol | note |
+|---|---|---|---|---|
+| warm | `checkpoints/best.npy` (0.0376) | 12 × 300 | 0.0855 | chain blew up after restart 2 (viol 8–124) |
+| A | analytic | 40 × 300 | 0.0590 | stopped by user at restart 30 |
+| **B** | analytic | **40 × 200** | **0.0495** | **shipped** |
+| C | analytic | 70 × 200 | — | stopped by user inside the feasibility pass |
+
+**B vs the previous shipped best**, and the point of the whole exercise:
+
+| audit check | previous (0.0376) | B (0.0495) |
+|---|---|---|
+| closest non-foot approach | **−0.2 mm** | **+9.7 mm** (+9.99 at knots, +9.72 between) |
+| head at touchdown | +0.1 mm | clear — off the close-approach list entirely |
+| net rotation | −359.9998° | −359.9996° |
+| flight CoM ballistic | 4.98e-05 | 3.71e-04 (passes) |
+| flight angular momentum | FAIL 2.24e-02 | FAIL **7.13e-03** — 3× better |
+| friction cone | pass | pass |
+| torque envelope | pass | pass |
+| floor penetration | +0.06 / +0.24 mm | +0.08 / +0.06 mm |
+| tuck (peak I_yy) | 0.5091 | **0.5091** — identical |
+| collocation vs integrator | FAIL 2.9e-02 / 2.2e-01 | FAIL 3.2e-02 / 2.8e-01 |
+| | 6/8 | **7/9** |
+
+B fails only the same two checks the previous best fails, and beats it on angular momentum.
+**The 10 mm margin cost essentially nothing dynamically** — the large degradation seen in the
+first, half-budget runs (flight drift 2.7e-01, ballistic failing) was under-convergence, not
+the margin fighting the physics. Worth remembering the next time a constraint "looks
+expensive" after one short search.
+
+### Two things worth carrying forward
+
+1. **B found its best on restart 39 of 40**, having sat at 0.0776 since restart 14. The
+   search was still improving when the budget ran out, so on this problem *budget*, not the
+   formulation, was the binding constraint. Chain C (70 × 200, same recipe) exists to test
+   that and was stopped before it produced anything — it is the obvious thing to rerun.
+2. **Long runs keep dying to session teardown** (this has now cost three searches, including
+   the one that made the stale file). Launch them detached:
+   `setsid nohup env PYTHONUNBUFFERED=1 uv run traj_opt/solve_backflip.py ... &` — they
+   reparent to `systemd --user` and survive the editor closing. `PYTHONUNBUFFERED=1` also
+   makes `[restart N]` lines appear live instead of only at exit, which is why an earlier
+   chain looked silent for hours while it was in fact fine.
 
 ## 2026-09-01 session: the geometry fix works — the shipped .npz was just stale
 
@@ -812,13 +912,13 @@ to the analytic guess; (4) nullity after each change — done, 15/4424 and 16/47
 | `tools/check_envelope.py` | unit check for the linear torque-speed envelope | done, passes |
 | `tools/tuck_box.py` | self-collision-free sagittal joint box (flight only) | done |
 | `traj_opt/schedule.py` | phase table — flight **26 knots** (grown 14→20→26; 32 tried 2026-09-01 and reverted, much worse), `h_max` 0.055→0.040→0.032 | — |
-| `tools/check_npz.py` | geometric review of a saved `.npz`: exact lowest point of every collision geom, flight I_yy, net pitch — measures the file that gets replayed, not the solver's residuals | done; found the stale output and the between-knot floor bulge |
-| `traj_opt/program.py` | the NLP: constraints, all three fixed bugs live here | builds cleanly, nullity 13/4424 at the 26-knot size (was 12/3680 at 14 knots), not yet solved |
+| `tools/check_npz.py` | geometric review of a saved `.npz`: exact lowest point of every collision geom, closest **non-foot** approach, flight I_yy, net pitch — measures the file that gets replayed, not the solver's residuals | done; found the stale output, the between-knot floor bulge, and the grazing knee/head |
+| `traj_opt/program.py` | the NLP: constraints, all fixed bugs live here; `BODY_CLEARANCE` = 10 mm for non-foot witness spheres, 0 for the two foot spheres | builds cleanly, nullity **15/4424** at the 26-knot size (unchanged by the clearance margin — it moved an inequality bound only), not yet solved |
 | `traj_opt/nullity_check.py` | FD-Jacobian/SVD LICQ diagnostic — found bugs 1-3 | done, rerun after any constraint-family change |
 | `traj_opt/guess.py` | analytic initial guess, single-shooting launch/flight, knot-count-generic (no changes needed to run at any flight size) | done, best IPOPT result yet at 14 knots (violation 5.7 pre-restart, 0.0298-0.0308 post-restart); at 20 knots starts at violation 83 pre-solve |
 | `traj_opt/warm_start.py` | mesh-refinement warm-start: export a solved phase's continuous reconstruction resampled at a new knot count, `--warm-start` flag on `solve_backflip.py` | done, but wrong tool for 14→20 (resampling an under-resolved source gave violation 586, worse than the plain analytic guess's 83) — keep for refining an already-smooth solution (e.g. a later 20→26) |
 | `traj_opt/solve_backflip.py` | CLI, `--solver ipopt\|snopt`, `--feas-tol`, `--opt-tol`, `--restarts`/`--burst-iters`, `--warm-start` | `extract()` 3D-`GetSolution` bug fixed; restart-from-checkpoint is a real feature; `result_from_vector()` added for inspecting raw checkpoints without a fresh solve |
-| `traj_opt/audit.py` | post-solve physics audit | torque-envelope check fixed to test `torque_speed_halfplanes` (was testing the wrong, intentionally-divergent bound); rotation-check tolerances loosened to the solve's own scale (were tighter than any non-`is_success()` result could ever pass) |
+| `traj_opt/audit.py` | post-solve physics audit, **9 checks** | ninth check added: closest non-foot approach vs `BODY_CLEARANCE`, because penetration-below-zero could not see a geom grazing the floor at 0.1 mm; torque-envelope check fixed to test `torque_speed_halfplanes` (was testing the wrong, intentionally-divergent bound); rotation-check tolerances loosened to the solve's own scale (were tighter than any non-`is_success()` result could ever pass) |
 | `traj_opt/replay.py`, `traj_opt/mj_divergence.py` | meshcat playback, MuJoCo open-loop divergence (TODO-10) | untested end-to-end, no solve has reached `is_success()` yet |
 
 Run with:

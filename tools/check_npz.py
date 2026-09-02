@@ -19,12 +19,16 @@ Reports, per frame, over MuJoCo's own kinematics:
 from __future__ import annotations
 
 import argparse
+import sys
 from pathlib import Path
 
 import mujoco
 import numpy as np
 
 from go2_backflip import constants as K
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "traj_opt"))
+from program import BODY_CLEARANCE  # noqa: E402  (needs the path above)
 
 NPZ = Path(__file__).resolve().parents[1] / "traj_opt" / "out" / "backflip.npz"
 FLIGHT_FOOT_Z = 0.005     # a foot this far up is not carrying the robot
@@ -106,6 +110,18 @@ def main() -> None:
     pen = -low.min()
     print(f"  worst penetration {pen * 1000:+.1f} mm "
           f"({'OK' if pen < 2e-3 else 'CLIPS THE FLOOR'})")
+
+    # Penetration is not the whole question: the feet are MEANT to reach the floor, and
+    # everything else is meant to stay off it by a visible margin. Grazing at 0.1 mm reads as
+    # a collision in replay and passes a check that only looks for a negative number -- the
+    # rear knee scraped through launch and the head touched down before the feet did, both at
+    # a clearance the old report rounded to +0.0 mm.
+    other = [i for i, g in enumerate(geoms) if g not in feet]
+    k, i = np.unravel_index(low[:, other].argmin(), low[:, other].shape)
+    gap = low[k, other[i]]
+    name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, geoms[other[i]])
+    print(f"  closest non-foot approach {gap * 1000:+.1f} mm "
+          f"({name} at t={t[k]:.3f}s) -- {'OK' if gap > BODY_CLEARANCE / 2 else 'TOO CLOSE'}")
 
     print("\ntuck (I_yy about the CoM):")
     if flight.size:
