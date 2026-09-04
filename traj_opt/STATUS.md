@@ -131,11 +131,43 @@ integration drift — and both still live almost entirely in flight. Every candi
 has 100% of its violation in collocation defects; no physical constraint (friction cone,
 torque envelope, floor, clearance) is violated by more than 1e-6 in any of them.
 
+### A warm start was never actually warm
+
+Found while watching the first audit-ranked search start. `main()` always ran a feasibility
+pass and then a costed pass before `restart_loop`, including when seeded with
+`--start-checkpoint`. Both are long continuous solves — the exact thing the burst structure
+exists to avoid, and the thing this problem is documented (2026-08-22) to handle badly.
+
+Seeded with `burst_38`, audit score **16.05**, those two passes handed the restart loop a
+**41.97**. The search then spent its first bursts climbing back to where it had started. The
+first attempt showed the same thing on the violation: IPOPT took the seed's 0.4259 into
+restoration and was at 3.13 when the run was killed.
+
+`--no-prepass` adds the cost and enters the loop on the seed itself, through the existing
+bit-exact `result_from_vector`. Measured: `restart loop starting from viol=0.4259 audit=9/11
+score=16.053`.
+
+It is deliberately **not** the default. The unseeded path has to run those passes — there is
+nothing to preserve when the start point is `guess.py` — and every result in this file came
+through them, so changing the default would silently change what a bare `--restarts` run
+means. Use it whenever `--start-checkpoint` is given.
+
+Two smaller fixes went in alongside, both found by exercising the new code rather than by any
+search: `rank()` guarded the audit but not `max_violation`, which sits beside it and throws on
+the same degeneracies (Drake refuses an all-zero quaternion), so one bad burst could kill a
+40-burst run; and Python was block-buffering stdout to the redirected log, so the per-burst
+rankings arrived in 8 KB clumps minutes behind the solve.
+
 ### Next
 
-- **Run a fresh restart search under the new rule.** Everything above is a re-ranking of old
-  checkpoints; the rule has not yet *driven* a search. That is the actual test.
-- **Then retry flight at 34 knots.** It halved both failing checks at a fixed violation level
+- **Finish the two searches now running** (`flip-m1`, 26 knots seeded from `burst_38`;
+  `flip-m34`, 34 knots from the analytic guess). Early: m1 reached **15.645** at burst 1,
+  beating its seed — the first improvement the rule has *driven* rather than found in
+  checkpoints already on disk. m34 is at 23.3/8-of-11 after two bursts, but it is cold-started
+  against m1's warm start, so the two are not yet comparable.
+- **Re-run the seeded search with `--no-prepass`.** `flip-m1` was launched before that flag
+  existed and threw away its warm start; whatever it reaches is a floor, not a fair number.
+- **Then judge 34 knots.** It halved both failing checks at a fixed violation level
   (2026-09-03); it only hurt because the search was free to run past the good point on a
   criterion that could not see the damage. That criterion is now gone.
 
