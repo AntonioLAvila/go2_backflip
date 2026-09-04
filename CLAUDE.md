@@ -132,7 +132,8 @@ reverting just reproduces the same result forever) explore new territory instead
 raw decision-variable vector is saved to `traj_opt/out/checkpoints/` immediately, since a good
 point is one burst away from being overwritten by a worse one.
 
-**Bursts are ranked by `audit.score`, not by `max_violation`** — the two anti-correlate on this
+**Bursts are ranked by the audit — `(checks failed, worst overrun ratio, violation)` —
+not by `max_violation`** — the two anti-correlate on this
 problem, hard, and `STATUS.md` has the numbers in both directions (a point at 124x lower
 violation that audits *worse*; a point at 8.6x higher violation that is better on every physics
 check and is what the repo now ships). `max_violation` sees the knots only, so it is blind by

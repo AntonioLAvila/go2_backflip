@@ -2,13 +2,14 @@
 
 Last updated 2026-09-04. Not yet converged
 (`is_success()==False`), and it may never need to be — see next steps. Best
-confirmed result: IPOPT, **audit score 16.1 at 9/11 checks passing**, on the
+confirmed result: IPOPT, **9/11 audit checks passing, worst failure 3.6x over
+its threshold**, on the
 26-knot-flight problem with the 10 mm body-clearance margin, shipped as
 `out/backflip.npz` and reproducible from
 `out/checkpoints_backflip_clr_b/best_audit_b38.npy` with `--from-checkpoint`.
 
 **The headline number changed on 2026-09-04 from constraint violation to audit
-score, and the shipped trajectory changed with it.** Its violation is 0.4259 —
+the audit, and the shipped trajectory changed with it.** Its violation is 0.4259 —
 8.6x the 0.0495 of the point it replaced — and it is better than that point on
 every physics measure there is: half the flight angular-momentum drift, 2.7x
 less integration drift, an order of magnitude less CoM residual, and no pitch
@@ -56,15 +57,18 @@ from re-ranking checkpoints the old rule had already discarded.
 ### The rule
 
 `audit.report` now carries a **margin** — measured/threshold, so a check passes iff margin < 1
-— and `audit.score` sums `max(margin, 1.0)` over all eleven. Passing checks are clamped at 1.0
-deliberately: without the clamp the search could buy a lower score by driving an already-safe
-check further into the green while a failing one got worse. With it, the only way down is to
-move a failing check toward its threshold, and letting a passing check slip always costs more
-than the 1.0 it was contributing. `restart_loop` ranks bursts on `(score, max_violation)`,
-lexicographic, and still saves the lowest-violation point separately as `best_viol.npy` so
-runs stay comparable with every number quoted in the sections below.
+— and `restart_loop` ranks bursts on **`(checks failed, worst overrun, violation)`**,
+lexicographic. `best_viol.npy` still keeps the lowest-violation point separately so runs stay
+comparable with every number quoted in the sections below.
 
-The chain still runs on the raw result of every burst regardless of score. Selection and
+Deliberately not a weighted sum. A scalar over these eleven checks would be adding radians to
+metres to N.m.s to kg.m^2: it ranks perfectly well, but the number it produces measures
+nothing, and a headline figure nobody can interpret is worse than two that can. "9/11, worst
+3.6x over threshold" says what is wrong and how badly. (A `score()` scalar was tried first and
+removed the same day for exactly this reason; the ordering of every candidate below is
+unchanged by the swap.)
+
+The chain still runs on the raw result of every burst regardless of rank. Selection and
 exploration are separate; filtering what gets chained would collapse the search back to a
 deterministic fixed point (the same reason reverting to the best-seen point never worked).
 
@@ -72,16 +76,15 @@ deterministic fixed point (the same reason reverting to the best-seen point neve
 
 Re-ranking `out/checkpoints_backflip_clr_b/` — the run that produced the shipped trajectory:
 
-| by violation (old rule) | viol | score | | by audit score (new rule) | viol | score |
+| by violation (old rule) | viol | audit | | by audit (new rule) | viol | audit |
 |---|---|---|---|---|---|---|
-| `best_0495` | 0.0495 | 22.4 | | `burst_38` | 0.4259 | **15.9** |
-| `burst_14` | 0.0776 | 186.7 | | `burst_24` | 0.1135 | 18.4 |
-| `burst_18` | 0.0812 | 165.4 | | `burst_30` | 0.3489 | 19.5 |
-| `burst_19` | 0.0950 | 189.8 | | `burst_29` | 2.7513 | 20.6 |
+| `best_0495` | 0.0495 | 9/11, worst 9.80x | | `burst_38` | 0.4259 | **9/11, worst 3.62x** |
+| `burst_14` | 0.0776 | 8/11, worst 121.70x | | `burst_24` | 0.1135 | 9/11, worst 5.30x |
+| `burst_18` | 0.0812 | 7/11, worst 104.60x | | `burst_29` | 2.7513 | 9/11, worst 7.86x |
 
 The two orderings share nothing below the top. And the old rule's *second* choice — 0.0776,
-the next-lowest violation in the whole run — scores 186.7, eight times worse than the point it
-did keep. Below about 0.1, `max_violation` carries almost no information about whether the
+the next-lowest violation in the whole run — fails three checks with one of them **121x** over
+its threshold, against 9.80x on a single check for the point it did keep. Below about 0.1, `max_violation` carries almost no information about whether the
 trajectory is physically sound.
 
 ### `burst_38` beats the shipped trajectory on every physics measure
@@ -93,7 +96,7 @@ trajectory is physically sound.
 | in-phase integration drift (q) | 4.90e-2 | **1.81e-2** |
 | flight CoM ballistic residual | 3.71e-4 | **4.27e-5** |
 | worst pitch reversal | 0.0489 deg | **0.0000 deg** |
-| audit score | 22.4 → 25.9 | **15.9 → 16.1** |
+| worst check, over threshold | 9.8x | **3.6x** |
 
 It is worse on exactly one number, the one the old rule ranked on. `burst_38` is now shipped
 as `out/backflip.npz` and kept as `out/checkpoints_backflip_clr_b/best_audit_b38.npy`; the
@@ -124,10 +127,40 @@ about 10x its 5e-3 threshold, not 6x — and `burst_38`'s is genuinely uniform a
 Every earlier "worst end-of-phase drift" number in the sections below is a lower bound on what
 this check now reports; do not compare them across the change.
 
+### All eleven checks on the shipped trajectory
+
+`burst_38`, violation 0.4259. Margin is measured/threshold, so a check passes below 1.0.
+
+| # | check | measured | threshold | margin |
+|---|---|---|---|---|
+| 1 | quaternion stays unit | 3.94e-05 | 1e-4 | 0.39x |
+| 2 | net rotation is one backflip | -359.9979 deg, reversal 0.00000 deg | 1e-3 rad | 0.37x |
+| 3 | flight CoM ballistic | 4.27e-05 m | 1e-3 | 0.04x |
+| **4** | **flight angular momentum conserved** | **3.44e-03** | 1e-3 | **3.44x** |
+| 5 | friction cone | 8.63e-07 N | 1e-6 | 0.86x |
+| 6 | torque-speed halfplanes | 0.00 N.m | 1e-6 | 0.00x |
+| 7 | no geometry below floor | +0.08 mm (never penetrates) | 2 mm | 0.04x |
+| 8 | non-foot clearance margin | 7.58 mm (base, absorb) | 5 mm | 0.49x |
+| 9 | sagittal symmetry | 3.78e-04 rad | 1e-3 | 0.38x |
+| 10 | flight genuinely tucked | I_yy 0.5053 kg.m^2 | 0.55 | 0.92x |
+| **11** | **collocation vs tight integrator** | **1.81e-02 (q)** | 5e-3 | **3.62x** |
+
+Nine of the eleven are comfortable; six are an order of magnitude or more inside their bound.
+
 ### Still true, and still the two open failures
 
 Both surviving audit failures are the same two as before — flight angular momentum and
-integration drift — and both still live almost entirely in flight. Every candidate examined
+integration drift — and both still live almost entirely in flight. Check 11 breaks down per
+phase as load 2.0e-04, launch 3.0e-03, **flight 1.8e-02**, absorb 4.7e-05: flight carries
+~100x the drift of the phases either side of it, and the other three are already an order of
+magnitude inside the threshold, so adding knots anywhere but flight buys nothing.
+
+Check 4 is the cleaner argument of the two. In flight there is no contact, and joint torques
+are internal forces, so angular momentum about the CoM is conserved **exactly** as a matter of
+physics. Any drift there is not the solver getting the mechanics wrong — it is purely the cubic
+failing to represent the true trajectory between collocation points. It is an unusually direct
+measurement of transcription error, and the only things that reduce it are a finer flight mesh
+or a higher-order transcription. Every candidate examined
 has 100% of its violation in collocation defects; no physical constraint (friction cone,
 torque envelope, floor, clearance) is violated by more than 1e-6 in any of them.
 
@@ -138,14 +171,14 @@ pass and then a costed pass before `restart_loop`, including when seeded with
 `--start-checkpoint`. Both are long continuous solves — the exact thing the burst structure
 exists to avoid, and the thing this problem is documented (2026-08-22) to handle badly.
 
-Seeded with `burst_38`, audit score **16.05**, those two passes handed the restart loop a
-**41.97**. The search then spent its first bursts climbing back to where it had started. The
+Seeded with `burst_38` (worst check **3.6x** over), those two passes handed the restart loop
+a point whose worst check was **12.6x** over. The search then spent its first bursts climbing back to where it had started. The
 first attempt showed the same thing on the violation: IPOPT took the seed's 0.4259 into
 restoration and was at 3.13 when the run was killed.
 
 `--no-prepass` adds the cost and enters the loop on the seed itself, through the existing
 bit-exact `result_from_vector`. Measured: `restart loop starting from viol=0.4259 audit=9/11
-score=16.053`.
+worst 3.62x over`.
 
 It is deliberately **not** the default. The unseeded path has to run those passes — there is
 nothing to preserve when the start point is `guess.py` — and every result in this file came
@@ -164,10 +197,9 @@ Two negative results, both measured, both costing a couple of hours of core time
 
 **Restarts do not close this gap.** `flip-m1` (26 knots, seeded from `burst_38`) found its best
 at **burst 1** — 15.645 — and seventeen further bursts produced nothing better (closest 15.972,
-the rest 19 to 771). Against the seed's 16.053 that is 2.5%. The score decomposes cleanly:
-nine passing checks contribute 1.0 each, so 15.645 means the two failures sit at ~3.3x their
-thresholds. A search that moves the total a few percent per forty bursts is not the mechanism
-that closes 3.3x.
+the rest far worse). Its two failing checks sit at 2.0x and 4.6x their thresholds; the seed's
+were 3.4x and 3.6x. A search that trades one failing check against the other, by tens of
+percent, over forty bursts, is not the mechanism that closes a 3.6x gap.
 
 And there is a sharper reason it cannot be. **In flight, angular momentum about the CoM is
 conserved exactly** — joint torques are internal forces and cannot change it. So that check's
@@ -189,11 +221,11 @@ note used to justify side-by-side runs (see `checkpoint_dir`'s docstring) **does
 a concurrent run with the same seed and options is a duplicate, not a sample. To get a second
 sample something must differ: `--burst-iters`, a tolerance, `--cost-scale`.
 
-`m1`'s best (score 15.645, viol 0.1960) is kept at `out/checkpoints_backflip_m1/best.npy` but
-is **not** shipped: its angular-momentum drift is better than `burst_38`'s (2.03e-3 vs
-3.44e-3) and its integration drift is worse (2.31e-2 vs 1.81e-2). A 2.5% score delta with the
-two failing checks moving in opposite directions is inside the precision of how the score
-weights them, not a result.
+`m1`'s best (viol 0.1960) is kept at `out/checkpoints_backflip_m1/best.npy` but is **not**
+shipped: its angular-momentum drift is better than `burst_38`'s (2.03e-3 vs 3.44e-3) and its
+integration drift is worse (2.31e-2 vs 1.81e-2). On the ranking that matters its worst check is
+4.61x over against `burst_38`'s 3.62x, so it loses — where the scalar had called it a 2.5%
+win. That reversal is the clearest argument against the scalar.
 
 **Last session's 34-knot checkpoints cannot seed anything.** `checkpoints_backflip_h1` has the
 right variable count (5478) but evaluates at violations of 445-594 under the current
@@ -203,9 +235,9 @@ do not mean the same thing. A 34-knot run has to be cold-started.
 ### Next
 
 - **Finish the two searches now running** (`flip-m1`, 26 knots seeded from `burst_38`;
-  `flip-m34`, 34 knots from the analytic guess). Early: m1 reached **15.645** at burst 1,
+  `flip-m34`, 34 knots from the analytic guess). Early: m1's best came at burst 1,
   beating its seed — the first improvement the rule has *driven* rather than found in
-  checkpoints already on disk. m34 is at 23.3/8-of-11 after two bursts, but it is cold-started
+  checkpoints already on disk. m34 is at 8-of-11 after two bursts, but it is cold-started
   against m1's warm start, so the two are not yet comparable.
 - **Re-run the seeded search with `--no-prepass`.** `flip-m1` was launched before that flag
   existed and threw away its warm start; whatever it reaches is a floor, not a fair number.

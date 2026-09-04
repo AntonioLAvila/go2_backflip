@@ -184,15 +184,16 @@ def restart_loop(bp: BackflipProgram, make_opts, solver: str, feas_tol: float, o
     integration drift and a 0.131 deg pitch reversal. It is a spurious discrete solution, a
     cubic ringing between collocation points while satisfying the defects exactly AT them,
     and max_violation is blind to it by construction because it only ever looks at the knots.
-    audit.score is the continuous version of "9/11": each check contributes its overrun ratio
-    once it fails and a flat 1.0 while it passes. The chain still runs on the raw result of
-    every burst regardless of its score -- selection and exploration are separate, and
+    Ranking is on (checks failed, worst overrun ratio, violation), lexicographic -- not on a
+    weighted sum, which over these eleven checks would be adding radians to metres to N.m.s to
+    kg.m^2 and would rank fine while meaning nothing. The chain still runs on the raw result of
+    every burst regardless of how it ranks -- selection and exploration are separate, and
     filtering what gets chained would collapse the search back to a deterministic fixed point.
     """
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     def rank(res):
-        """(audit score, violation) for one point. Lexicographic: violation only breaks ties.
+        """(checks failed, worst overrun, violation). Lexicographic; violation breaks ties.
 
         A burst can be bad enough that this throws -- a phase whose duration went
         non-positive, or an all-zero quaternion, which Drake refuses to convert to a rotation
@@ -203,12 +204,14 @@ def restart_loop(bp: BackflipProgram, make_opts, solver: str, feas_tol: float, o
         try:
             viol = max_violation(bp.prog, res)
         except Exception as e:                                  # noqa: BLE001
-            return (float("inf"), float("inf")), f"unevaluable ({type(e).__name__}: {e})"
+            inf = float("inf")
+            return (99, inf, inf), f"unevaluable ({type(e).__name__}: {e})"
         try:
             a = audit.run(bp, res, extract(bp, res), quiet=True)
-            return (a.score, viol), f"viol={viol:.4f} audit={a}"
+            return a.key + (viol,), f"viol={viol:.4f} audit={a}"
         except Exception as e:                                  # noqa: BLE001
-            return (float("inf"), viol), f"viol={viol:.4f} audit=FAILED ({type(e).__name__}: {e})"
+            inf = float("inf")
+            return (99, inf, viol), f"viol={viol:.4f} audit=FAILED ({type(e).__name__}: {e})"
 
     best_key, best_desc = rank(result)
     best_result = result
@@ -238,8 +241,8 @@ def restart_loop(bp: BackflipProgram, make_opts, solver: str, feas_tol: float, o
         # The old criterion, kept alongside rather than dropped. It is the number every
         # earlier run in STATUS.md is quoted in, and keeping it costs one file: without it a
         # search under the new rule could not be compared against any of them.
-        if key[1] < best_viol_key:
-            best_viol_key = key[1]
+        if key[2] < best_viol_key:
+            best_viol_key = key[2]
             np.save(ckpt_dir / "best_viol.npy", x)
         bp.prog.SetInitialGuess(bp.prog.decision_variables(), x)   # chain forward, always
         if result.is_success():

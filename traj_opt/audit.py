@@ -33,15 +33,30 @@ class Check(NamedTuple):
 class Audit(NamedTuple):
     checks: list[Check]
     ok: bool
-    score: float
 
     @property
     def n_failed(self) -> int:
         return sum(not c.ok for c in self.checks)
 
+    @property
+    def worst(self) -> float:
+        """How far over its threshold the worst check is, as a ratio. 1.0 means exactly at it."""
+        return max((c.margin for c in self.checks), default=0.0)
+
+    @property
+    def key(self) -> tuple[int, float]:
+        """Ranking key, lower better: checks failed, then the worst overrun.
+
+        Deliberately not a single scalar. A weighted sum over these eleven checks would be
+        summing radians against metres against N.m.s against kg.m^2 -- it ranks, but the
+        number it produces is not a measurement of anything, and a headline figure that
+        cannot be interpreted is worse than two that can.
+        """
+        return (self.n_failed, self.worst)
+
     def __str__(self) -> str:
-        return (f"{len(self.checks) - self.n_failed}/{len(self.checks)} "
-                f"score={self.score:.3f}")
+        return (f"{len(self.checks) - self.n_failed}/{len(self.checks)} checks, "
+                f"worst {self.worst:.2f}x over")
 
 
 # Filled by report() during a run() and consumed by it. Module-level only because the checks
@@ -62,17 +77,6 @@ def report(name, ok, detail="", margin=None):
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  -- {detail}" if detail else ""))
 
 
-def score(checks) -> float:
-    """Lower is better. Every passing check contributes exactly 1.0 and every failing one
-    contributes its overrun ratio.
-
-    Clamping the passing ones at 1.0 is the point: without it the search could buy a lower
-    score by driving an already-comfortable check further into the green while a failing one
-    got worse. With it, the only way to improve is to move a failing check toward its
-    threshold -- and letting a passing check slip past its threshold always costs more than
-    the 1.0 it was contributing.
-    """
-    return float(sum(max(c.margin, 1.0) for c in checks))
 
 
 def _pitch(q):
@@ -379,8 +383,9 @@ def run(bp, result, phases, quiet=False) -> Audit:
     checks = list(RESULTS)
     QUIET = False
     failed = [c.name for c in checks if not c.ok]
+    a = Audit(checks, not failed)
     if not quiet:
         print(f"  {len(checks) - len(failed)}/{len(checks)} audit checks passed"
-              f", score {score(checks):.3f}"
+              + (f", worst {a.worst:.2f}x over threshold" if failed else "")
               + (f" -- FAILED: {', '.join(failed)}" if failed else ""))
-    return Audit(checks, not failed, score(checks))
+    return a
