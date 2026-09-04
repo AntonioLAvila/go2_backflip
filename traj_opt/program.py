@@ -109,6 +109,21 @@ MIRROR = 1e-2
 # rows from being over-determined in velocity alone.
 SAGITTAL_BOX = 1e-2
 
+# ...and a cost to keep the box above from being ridden, which at 1e-2 it was: the first solve
+# on the loosened formulation put 8.57e-3 of lateral wander on the zeroed DOFs, right against
+# the bound. The lesson is the one BODY_CLEARANCE already taught -- the optimizer spends every
+# millimetre it is allowed, and "the dynamics will carry it" is a prediction, not a mechanism.
+# The lateral subsystem is a genuine null direction of a sagittal motion (nothing forces it
+# either way), so any positive weight collapses it, and a weight is the right instrument
+# because it leaves the bound INACTIVE, which is the whole point of not pinning it.
+#
+# It lives in add_cost(), NOT in the constructor, and that placement is measured rather than
+# stylistic: on this problem ANY objective during the feasibility pass costs feasibility. The
+# same 400-iteration pass reaches 0.0025 with a zero objective and 0.0109 with this one -- 4x
+# worse for a term that is only tidying a null direction. So the feasibility pass stays empty
+# and the costed pass, which starts from its result, is what collapses the wander.
+SYM_COST = 10.0
+
 # And once more for the unit-quaternion box. This one is not redundant in the algebra -- the
 # exact flow conserves |q| but Hermite-Simpson only conserves it to O(h^5) -- which makes it
 # NEARLY dependent on the defects, and near-dependence is the harder kind to see: it degrades
@@ -250,6 +265,18 @@ class BackflipProgram:
         for p in PHASES:
             dc = DirectCollocation(self.plant, ctx, p.n_knots, p.h_min, p.h_max,
                                    input_port_index=port, prog=self.prog)
+            # A uniform step per phase, and it has to stay that way despite pointing straight
+            # at the drift. The measurement says the mesh is wrong: at viol 2.5e-3 the flight
+            # phase integrates to 1e-6..5e-5 in q on every interior segment but 9.7e-4 and
+            # 5.3e-4 on segments 0 and 24 -- the two ends, where the legs fold in after
+            # takeoff and extend again for the landing -- so uniform steps starve exactly the
+            # two intervals that carry the end-of-phase drift. Letting the steps vary is the
+            # textbook answer and it was tried: it is much worse here, 0.0025 -> 0.0706 over
+            # the same 400-iteration pass with everything else held, and a second run of it
+            # stalled outright at 11.8. Per-interval steps make every defect bilinear in its
+            # own h, and this NLP cannot afford that. If the end-of-phase drift needs fixing,
+            # the lever is a finer mesh where it is needed -- more knots, or splitting flight
+            # at the tuck ramps so each piece keeps its own uniform step -- not free steps.
             dc.AddEqualTimeIntervalsConstraints()
             self.dc.append(dc)
             self.u.append(self.prog.NewContinuousVariables(p.n_knots, NU, f"u_{p.name}"))
@@ -478,6 +505,18 @@ class BackflipProgram:
             self.prog.AddBoundingBoxConstraint([t_lo, c_lo, t_lo, c_lo], [t_hi, c_hi, t_hi, c_hi],
                                                [q[8], q[9], q[14], q[15]])
 
+    def _add_symmetry_cost(self):
+        """Collapse the lateral null direction instead of bounding it. See SYM_COST."""
+        terms = []
+        for p, ph in enumerate(PHASES):
+            for k in range(ph.n_knots):
+                q = self.state(p, k)[XQ]
+                terms += [q[1] ** 2, q[3] ** 2, q[5] ** 2]
+                terms += [q[7 + j] ** 2 for j in K.HIP_IDX]
+                for a, b in ((0, 3), (6, 9)):
+                    terms += [(q[7 + a + d] - q[7 + b + d]) ** 2 for d in (1, 2)]
+        self.prog.AddQuadraticCost(SYM_COST * sum(terms))
+
     @staticmethod
     def _mirror_contact_pairs(ph):
         idx = {f: i for i, f in enumerate(ph.contacts)}
@@ -605,14 +644,20 @@ class BackflipProgram:
     def add_cost(self, w_torque=1.0, w_rate=0.1, w_time=1.0, w_tuck=0.5):
         inv = 1.0 / K.torque_limits() ** 2
         for p, ph in enumerate(PHASES):
-            h = self.dc[p].time_step(0)[0]
-            eff = sum(float(inv[j]) * self.u[p][k][j] ** 2
-                      for k in range(ph.n_knots) for j in range(NU))
-            self.prog.AddCost(w_torque * h * eff)
+            # Per-interval steps now, so the running cost has to integrate against the actual
+            # mesh rather than one scalar h: weight each knot by half of each interval it
+            # touches (trapezoid), and price duration as the true sum of the steps.
+            hs = [self.dc[p].time_step(k)[0] for k in range(ph.n_knots - 1)]
+            eff = 0.0
+            for k in range(ph.n_knots):
+                dt = (0.0 + (0.5 * hs[k - 1] if k > 0 else 0.0)
+                      + (0.5 * hs[k] if k < ph.n_knots - 1 else 0.0))
+                eff = eff + dt * sum(float(inv[j]) * self.u[p][k][j] ** 2 for j in range(NU))
+            self.prog.AddCost(w_torque * eff)
             rate = sum((self.u[p][k + 1][j] - self.u[p][k][j]) ** 2 * float(inv[j])
                        for k in range(ph.n_knots - 1) for j in range(NU))
             self.prog.AddCost(w_rate * rate)
-            self.prog.AddCost(w_time * (ph.n_knots - 1) * h)
+            self.prog.AddCost(w_time * sum(hs))
 
         # Pull the tucked knots toward TUCK_LEGS rather than letting them sit anywhere in the
         # window. The hard window guarantees the inertia; this makes the solver settle inside
@@ -623,3 +668,5 @@ class BackflipProgram:
                    for k in range(TUCK_RAMP, PHASES[FLIGHT].n_knots - TUCK_RAMP)
                    for j, t in ((8, tgt[0]), (9, tgt[1]), (14, tgt[0]), (15, tgt[1])))
         self.prog.AddCost(w_tuck * tuck)
+
+        self._add_symmetry_cost()

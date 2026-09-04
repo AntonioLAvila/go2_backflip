@@ -176,7 +176,15 @@ def restart_loop(bp: BackflipProgram, make_opts, solver: str, feas_tol: float, o
     """
     best_result, best_viol = result, max_violation(bp.prog, result)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    np.save(ckpt_dir / "burst_start.npy", result.GetSolution(bp.prog.decision_variables()))
+    x0 = result.GetSolution(bp.prog.decision_variables())
+    np.save(ckpt_dir / "burst_start.npy", x0)
+    # Start burst 0 from the point we were HANDED, not from whatever guess is still sitting on
+    # the program. Only the costed path re-seeded it after the feasibility pass, so
+    # --feasibility-only spent its first burst restarting from guess.py -- measured at
+    # inf_pr 99.7 against the 0.0025 the pass had just reached, and the chain then carries that
+    # burst's result forward, so it is the whole search that starts in the wrong place.
+    bp.prog.SetInitialGuess(bp.prog.decision_variables(), x0)
+    print(f"  restart loop starting from viol={best_viol:.4f}")
 
     for r in range(n_restarts):
         result = solve(bp, make_opts(feas_tol, opt_tol, burst_iters), f"restart {r}", solver)
