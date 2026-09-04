@@ -96,6 +96,32 @@ NO_SLIP = 1e-3
 # velocity alone, and the guess-level equality nullity goes 13 -> 224. Measured, not assumed.
 MIRROR = 1e-2
 
+# ...and the same argument, and the same bound, for the DOFs a sagittal motion holds at zero:
+# quat_x, quat_z, base y, and the four hips. Pinning each of them at EVERY knot is the same
+# over-determination -- per DOF per phase, n pin rows on top of the 2n-2 defect rows that
+# already govern the same 2n unknowns -- and it showed up as 34 more units of null-space
+# energy in the active set. What anchors these is _add_boundary, which pins the whole of q at
+# the first knot and the whole of q again at the last, exactly; between those the defects and
+# the mechanism's own sagittal symmetry carry them, and this is the safety net.
+#
+# This is NOT the fixed-variable version that was tried and rejected (see the note below):
+# a loose box keeps the positions as unknowns, which is precisely what keeps their own defect
+# rows from being over-determined in velocity alone.
+SAGITTAL_BOX = 1e-2
+
+# And once more for the unit-quaternion box. This one is not redundant in the algebra -- the
+# exact flow conserves |q| but Hermite-Simpson only conserves it to O(h^5) -- which makes it
+# NEARLY dependent on the defects, and near-dependence is the harder kind to see: it degrades
+# the conditioning without ever showing up as a row anyone can point at. (It is not what the
+# active-set check flags; that turned out to be the time steps on h_max. This is loosened on
+# the sizing argument alone, and audit.py measures what the defects then deliver.) Size the
+# error rather than guess it: the half-angle turns at ~6 rad/s, so the fifth derivative is ~6^5 and the local
+# norm error is h^5 * 6^5 / 2880 ~ 2e-8 per step, a few times 1e-7 over a whole phase -- three
+# orders under the 1e-4 this box was holding. Both ends of the trajectory pin q exactly
+# (_add_boundary), so the defects carry the norm between them and this is the safety net that
+# catches gross drift. audit.py reports the norm error it actually achieves.
+QUAT_BOX = 1e-2
+
 # Generous, physically-loose upper bounds -- go2 weighs ~149 N total, so these are 10-25x a
 # static single-foot share, never expected to bind, just there to give IPOPT's interior-point
 # method a finite barrier region on every variable (see the TIGHT comment above).
@@ -307,17 +333,27 @@ class BackflipProgram:
                 # ...and it is not moving there: the exact time derivative of that same pin,
                 # imposed at the same knots. Without it the pin holds only pointwise, and the
                 # cubic between two pinned knots is free to bulge through the floor.
-                kin_v = self._kin(ph.contacts)
+                #
+                # Except where something else already says it, in which case this is a
+                # duplicate row in the KKT system rather than a constraint: the trajectory
+                # starts and ends at rest (_add_boundary pins all of v), a phase's first knot
+                # IS the previous phase's last knot and inherits its no-slip through the
+                # state-continuity equality, and absorb's first knot is covered by the
+                # touchdown impulse's own post-impact no-slip rows (J @ v_plus == 0, whose
+                # vertical component is exactly this).
+                if k not in self._noslip_implied(p, ph):
+                    kin_v = self._kin(ph.contacts)
 
-                def gv(z, kin=kin_v, nc=nc):
-                    q, v = z[:NQ], z[NQ:]
-                    plant, ctx, frames = kin.at(q)
-                    return np.array([(kin.jac_centre(plant, ctx, fr) @ v)[2] for fr in frames])
+                    def gv(z, kin=kin_v, nc=nc):
+                        q, v = z[:NQ], z[NQ:]
+                        plant, ctx, frames = kin.at(q)
+                        return np.array(
+                            [(kin.jac_centre(plant, ctx, fr) @ v)[2] for fr in frames])
 
-                eps_v = NO_SLIP * np.ones(nc)
-                self.prog.AddConstraint(
-                    gv, -eps_v, eps_v, self.state(p, k),
-                    description=f"noslip_{ph.name}_{k}")
+                    eps_v = NO_SLIP * np.ones(nc)
+                    self.prog.AddConstraint(
+                        gv, -eps_v, eps_v, self.state(p, k),
+                        description=f"noslip_{ph.name}_{k}")
 
                 lam = self.lam[p][k]
                 # lambda_y == 0: the motion is sagittal, so a lateral GRF would be a pure
@@ -334,6 +370,18 @@ class BackflipProgram:
                     if foot not in PHASES[p + 1].contacts:
                         self.prog.AddBoundingBoxConstraint(
                             0.0, 0.0, self.lam[p][ph.n_knots - 1][i, 2])
+
+    @staticmethod
+    def _noslip_implied(p, ph):
+        """Knots of phase p where the stance no-slip row is already imposed by something else."""
+        implied = set()
+        if p == 0:
+            implied.add(0)                              # x0 pins all of v to zero
+        else:
+            implied.add(0)                              # continuity, or the impact's own rows
+        if p == len(PHASES) - 1:
+            implied.add(ph.n_knots - 1)                 # xf pins all of v to zero
+        return implied
 
     # --- actuator envelope, joint and speed limits -------------------------
     def _add_actuator_limits(self):
@@ -389,10 +437,11 @@ class BackflipProgram:
             for k in range(ph.n_knots):
                 x, u = self.state(p, k), self.u[p][k]
                 q, v = x[XQ], x[XV]
-                self.prog.AddBoundingBoxConstraint(-TIGHT, TIGHT, [q[1], q[3], q[5]])
+                self.prog.AddBoundingBoxConstraint(
+                    -SAGITTAL_BOX, SAGITTAL_BOX, [q[1], q[3], q[5]])
                 self.prog.AddBoundingBoxConstraint(-WY_MAX, 0.0, v[1])
                 for j in K.HIP_IDX:
-                    self.prog.AddBoundingBoxConstraint(-TIGHT, TIGHT, q[7 + j])
+                    self.prog.AddBoundingBoxConstraint(-SAGITTAL_BOX, SAGITTAL_BOX, q[7 + j])
                 for a, b in ((0, 3), (6, 9)):          # FL/FR and RL/RR leg blocks
                     self.prog.AddLinearConstraint(u[a] + u[b] == 0.0)
                     for d in (1, 2):
@@ -540,8 +589,8 @@ class BackflipProgram:
             for k in range(ph.n_knots):
                 q = self.state(p, k)[XQ]
                 norm = q[0] ** 2 + q[2] ** 2
-                self.prog.AddConstraint(1.0 - TIGHT <= norm)
-                self.prog.AddConstraint(norm <= 1.0 + TIGHT)
+                self.prog.AddConstraint(1.0 - QUAT_BOX <= norm)
+                self.prog.AddConstraint(norm <= 1.0 + QUAT_BOX)
 
     def _scale(self):
         for p, ph in enumerate(PHASES):

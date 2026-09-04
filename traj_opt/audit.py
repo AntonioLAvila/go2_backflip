@@ -15,7 +15,8 @@ from pydrake.systems.framework import DiagramBuilder
 from pydrake.systems.primitives import ConstantVectorSource, TrajectorySource
 
 from go2_backflip import constants as K
-from program import BODY_CLEARANCE, make_plant, MIRROR, TUCK_RAMP, XQ, XV
+from program import (BODY_CLEARANCE, make_plant, MIRROR, QUAT_BOX, SAGITTAL_BOX,
+                     TUCK_RAMP, XQ, XV)
 from schedule import FLIGHT, PHASES
 
 G = 9.81
@@ -50,6 +51,12 @@ def check_rotation(phases):
     # checkpoint (like every result so far) is accepted at max_violation ~1e-2, not
     # solved to is_success()==True, so a tolerance tighter than that measures the solve's
     # remaining primal gap, not a rotation defect.
+    # The unit-norm box is a loose safety net now (QUAT_BOX), not a 1e-4 pin: the defects are
+    # what hold the norm between the two exactly-pinned ends, and a non-unit quaternion scales
+    # Drake's qdot = N(q) v mapping, so the error here IS a rotation-rate error. Report it.
+    nq = float(np.abs(q[:, 0] ** 2 + q[:, 2] ** 2 - 1.0).max())
+    report("quaternion stays unit without being pinned", nq < 1e-4,
+           f"worst |q|^2 - 1 = {nq:.2e}, bound {QUAT_BOX:.0e}")
     report("net rotation is one full backflip",
            abs(net + 2 * np.pi) < 1e-3 and worst_reversal < 1e-3,
            f"{np.degrees(net):.4f} deg, worst reversal {np.degrees(worst_reversal):.5f} deg, "
@@ -203,9 +210,10 @@ def check_symmetry(phases):
     # A tenth of the safety net: at that level the mirror is being carried by the dynamics, as
     # intended, rather than by the bound. Riding the bound would mean the motion genuinely
     # wants to be asymmetric and the check should fail loudly.
-    report("sagittal symmetry holds without being pinned", mirror < MIRROR / 10,
+    report("sagittal symmetry holds without being pinned",
+           mirror < MIRROR / 10 and zero < SAGITTAL_BOX / 10,
            f"worst L/R mismatch {mirror:.2e} rad ({where}), bound {MIRROR:.0e}; "
-           f"worst |q| on the zeroed DOFs {zero:.2e}")
+           f"worst |q| on the zeroed DOFs {zero:.2e}, bound {SAGITTAL_BOX:.0e}")
 
 
 def check_tuck(plant, phases):
