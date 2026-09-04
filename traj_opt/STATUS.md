@@ -158,6 +158,48 @@ the same degeneracies (Drake refuses an all-zero quaternion), so one bad burst c
 40-burst run; and Python was block-buffering stdout to the redirected log, so the per-burst
 rankings arrived in 8 KB clumps minutes behind the solve.
 
+### The restart search is not the lever, and reseeding it is not a second sample
+
+Two negative results, both measured, both costing a couple of hours of core time.
+
+**Restarts do not close this gap.** `flip-m1` (26 knots, seeded from `burst_38`) found its best
+at **burst 1** — 15.645 — and seventeen further bursts produced nothing better (closest 15.972,
+the rest 19 to 771). Against the seed's 16.053 that is 2.5%. The score decomposes cleanly:
+nine passing checks contribute 1.0 each, so 15.645 means the two failures sit at ~3.3x their
+thresholds. A search that moves the total a few percent per forty bursts is not the mechanism
+that closes 3.3x.
+
+And there is a sharper reason it cannot be. **In flight, angular momentum about the CoM is
+conserved exactly** — joint torques are internal forces and cannot change it. So that check's
+drift is not physics the solver got wrong; it is a direct measurement of transcription error,
+of how badly the cubic represents the flight dynamics. No amount of searching within a fixed
+mesh reduces it. Only a finer flight mesh or a better transcription does.
+
+**Seeding a new run from another run's checkpoint is not an independent sample.** `flip-m2`
+was launched from `flip-m1`'s best on the theory that multithreaded `spral` would make the two
+chains diverge. It reproduced m1's chain bit-for-bit, offset by two bursts:
+
+```
+m1 bursts 2-10 : 52.255 48.146 39.806 23.666 30.801 15.972 28.420 771.143 49.122
+m2 bursts 0-8  : 52.255 48.146 39.806 23.666 30.801 15.972 28.420 771.143 49.122
+```
+
+IPOPT is fully deterministic in this configuration. The "the search is stochastic in practice"
+note used to justify side-by-side runs (see `checkpoint_dir`'s docstring) **does not hold** —
+a concurrent run with the same seed and options is a duplicate, not a sample. To get a second
+sample something must differ: `--burst-iters`, a tolerance, `--cost-scale`.
+
+`m1`'s best (score 15.645, viol 0.1960) is kept at `out/checkpoints_backflip_m1/best.npy` but
+is **not** shipped: its angular-momentum drift is better than `burst_38`'s (2.03e-3 vs
+3.44e-3) and its integration drift is worse (2.31e-2 vs 1.81e-2). A 2.5% score delta with the
+two failing checks moving in opposite directions is inside the precision of how the score
+weights them, not a result.
+
+**Last session's 34-knot checkpoints cannot seed anything.** `checkpoints_backflip_h1` has the
+right variable count (5478) but evaluates at violations of 445-594 under the current
+formulation — it was produced under different bounds *and* a different `h_max`, so the vectors
+do not mean the same thing. A 34-knot run has to be cold-started.
+
 ### Next
 
 - **Finish the two searches now running** (`flip-m1`, 26 knots seeded from `burst_38`;

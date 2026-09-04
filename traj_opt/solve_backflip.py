@@ -155,9 +155,13 @@ def max_violation(prog, result) -> float:
 
 def checkpoint_dir(out: Path) -> Path:
     """Where a run writes its bursts. Derived from --out so two independent restart searches
-    can run side by side without overwriting each other's checkpoints -- the search is
-    stochastic in practice (see STATUS.md), so a second concurrent run is a real second
-    sample, not a duplicate."""
+    can run side by side without overwriting each other's checkpoints.
+
+    A concurrent run is only a real second sample if something about it DIFFERS -- a different
+    seed, --burst-iters, tolerance or --cost-scale. IPOPT is deterministic here: a run seeded
+    from another run's checkpoint with identical options reproduces its chain bit-for-bit
+    (measured 2026-09-04, nine bursts identical to the digit). This docstring used to claim the
+    search was stochastic in practice. It is not."""
     return out.parent / ("checkpoints" if out == OUT else f"checkpoints_{out.stem}")
 
 
