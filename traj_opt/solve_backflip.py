@@ -295,6 +295,11 @@ def save(t, x, u, out: Path = OUT):
 
 
 def main() -> int:
+    # These runs are hours long and are watched by tailing a redirected log. Python
+    # block-buffers stdout to a file, so the per-burst rankings -- the only lines worth
+    # watching -- arrive in 8 KB clumps well behind the solve. IPOPT's own output is written
+    # from C++ and is unaffected either way.
+    sys.stdout.reconfigure(line_buffering=True)
     ap = argparse.ArgumentParser()
     ap.add_argument("--solver", choices=["ipopt", "snopt"], default="ipopt")
     ap.add_argument("--iters", type=int, default=3000)
