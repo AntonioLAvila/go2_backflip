@@ -173,9 +173,37 @@ def restart_loop(bp: BackflipProgram, make_opts, solver: str, feas_tol: float, o
     Chaining forward through temporary regressions is what actually explores new territory.
     Every burst's checkpoint is saved to disk immediately so a good point is never lost to a
     worse one two bursts later.
+
+    Bursts are RANKED BY THE AUDIT, not by max_violation. That is the 2026-09-04 change, and
+    it exists because the two anti-correlate here: a search run to 0.0004 -- 124x below the
+    0.0495 point this repo ships -- audits 7/11 against the shipped point's 9/11, with 5x the
+    integration drift and a 0.131 deg pitch reversal. It is a spurious discrete solution, a
+    cubic ringing between collocation points while satisfying the defects exactly AT them,
+    and max_violation is blind to it by construction because it only ever looks at the knots.
+    audit.score is the continuous version of "9/11": each check contributes its overrun ratio
+    once it fails and a flat 1.0 while it passes. The chain still runs on the raw result of
+    every burst regardless of its score -- selection and exploration are separate, and
+    filtering what gets chained would collapse the search back to a deterministic fixed point.
     """
-    best_result, best_viol = result, max_violation(bp.prog, result)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+    def rank(res):
+        """(audit score, violation) for one point. Lexicographic: violation only breaks ties.
+
+        A burst can be bad enough that extract/audit throws -- a non-unit quaternion the
+        integrator refuses, a phase whose duration went non-positive. That is a legitimate
+        "worst possible" answer, not a crash worth losing the search over.
+        """
+        viol = max_violation(bp.prog, res)
+        try:
+            a = audit.run(bp, res, extract(bp, res), quiet=True)
+            return (a.score, viol), f"viol={viol:.4f} audit={a}"
+        except Exception as e:                                  # noqa: BLE001
+            return (float("inf"), viol), f"viol={viol:.4f} audit=FAILED ({type(e).__name__}: {e})"
+
+    best_key, best_desc = rank(result)
+    best_result = result
+    best_viol_key = max_violation(bp.prog, result)
     x0 = result.GetSolution(bp.prog.decision_variables())
     np.save(ckpt_dir / "burst_start.npy", x0)
     # Start burst 0 from the point we were HANDED, not from whatever guess is still sitting on
@@ -184,20 +212,36 @@ def restart_loop(bp: BackflipProgram, make_opts, solver: str, feas_tol: float, o
     # inf_pr 99.7 against the 0.0025 the pass had just reached, and the chain then carries that
     # burst's result forward, so it is the whole search that starts in the wrong place.
     bp.prog.SetInitialGuess(bp.prog.decision_variables(), x0)
-    print(f"  restart loop starting from viol={best_viol:.4f}")
+    np.save(ckpt_dir / "best.npy", x0)
+    np.save(ckpt_dir / "best_viol.npy", x0)
+    print(f"  restart loop starting from {best_desc}")
 
     for r in range(n_restarts):
         result = solve(bp, make_opts(feas_tol, opt_tol, burst_iters), f"restart {r}", solver)
         x = result.GetSolution(bp.prog.decision_variables())
         np.save(ckpt_dir / f"burst_{r}.npy", x)
-        viol = max_violation(bp.prog, result)
-        if viol < best_viol:
-            best_result, best_viol = result, viol
+        key, desc = rank(result)
+        print(f"    {desc}")
+        if key < best_key:
+            best_key, best_result, best_desc = key, result, desc
             np.save(ckpt_dir / "best.npy", x)
-            print(f"  new best: viol={best_viol:.4f}")
+            print(f"  new best: {desc}")
+        # The old criterion, kept alongside rather than dropped. It is the number every
+        # earlier run in STATUS.md is quoted in, and keeping it costs one file: without it a
+        # search under the new rule could not be compared against any of them.
+        if key[1] < best_viol_key:
+            best_viol_key = key[1]
+            np.save(ckpt_dir / "best_viol.npy", x)
         bp.prog.SetInitialGuess(bp.prog.decision_variables(), x)   # chain forward, always
         if result.is_success():
+            # Has never happened on this problem. If it does, best.npy must be the point that
+            # is returned, not whatever scored best before it -- the two files and the caller's
+            # trajectory have to describe the same solve.
+            np.save(ckpt_dir / "best.npy", x)
+            print(f"  SOLVED on restart {r}: {desc}")
             return result
+    print(f"  restart loop best: {best_desc} "
+          f"(lowest violation seen was {best_viol_key:.4f}, in best_viol.npy)")
     return best_result
 
 
@@ -314,7 +358,7 @@ def main() -> int:
         result = result_from_vector(bp, load_checkpoint(args.from_checkpoint))
         print(f"[{args.from_checkpoint.name}] viol={max_violation(bp.prog, result):.4f}")
         phases = extract(bp, result)
-        ok = audit.run(bp, result, phases)
+        ok = audit.run(bp, result, phases).ok
         t, xs, u = resample(phases)
         save(t, xs, u, args.out)
         return 0 if ok else 2
@@ -357,7 +401,7 @@ def main() -> int:
         return 1
 
     phases = extract(bp, result)
-    ok = audit.run(bp, result, phases)
+    ok = audit.run(bp, result, phases).ok
     t, x, u = resample(phases)
     save(t, x, u, args.out)
     return 0 if ok else 2

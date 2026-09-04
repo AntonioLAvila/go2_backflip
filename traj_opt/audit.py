@@ -8,6 +8,9 @@ that approximation. If it is large, raise the stance knot count before anything 
 
 from __future__ import annotations
 
+import logging
+from typing import NamedTuple
+
 import numpy as np
 from pydrake.multibody.tree import BodyIndex, JacobianWrtVariable
 from pydrake.systems.analysis import Simulator
@@ -20,12 +23,56 @@ from program import (BODY_CLEARANCE, make_plant, MIRROR, QUAT_BOX, SAGITTAL_BOX,
 from schedule import FLIGHT, PHASES
 
 G = 9.81
-RESULTS: list[tuple[str, bool, str]] = []
+class Check(NamedTuple):
+    name: str
+    ok: bool
+    margin: float          # measured / threshold: passes iff < 1, and 2.0 means twice over
+    detail: str
 
 
-def report(name, ok, detail=""):
-    RESULTS.append((name, ok, detail))
-    print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  -- {detail}" if detail else ""))
+class Audit(NamedTuple):
+    checks: list[Check]
+    ok: bool
+    score: float
+
+    @property
+    def n_failed(self) -> int:
+        return sum(not c.ok for c in self.checks)
+
+    def __str__(self) -> str:
+        return (f"{len(self.checks) - self.n_failed}/{len(self.checks)} "
+                f"score={self.score:.3f}")
+
+
+# Filled by report() during a run() and consumed by it. Module-level only because the checks
+# are plain functions called for their side effect; run() clears it first, so two runs in one
+# process (which restart_loop does, once per burst) cannot accumulate into each other.
+RESULTS: list[Check] = []
+QUIET = False
+
+
+def report(name, ok, detail="", margin=None):
+    """margin is measured/threshold, so ok == (margin < 1). Passed explicitly rather than
+    derived, because three of the checks combine two measurements against two different
+    thresholds and one of them is a lower bound, not an upper one."""
+    if margin is None:
+        margin = 0.5 if ok else 2.0
+    RESULTS.append(Check(name, ok, float(margin), detail))
+    if not QUIET:
+        print(f"  [{'PASS' if ok else 'FAIL'}] {name}" + (f"  -- {detail}" if detail else ""))
+
+
+def score(checks) -> float:
+    """Lower is better. Every passing check contributes exactly 1.0 and every failing one
+    contributes its overrun ratio.
+
+    Clamping the passing ones at 1.0 is the point: without it the search could buy a lower
+    score by driving an already-comfortable check further into the green while a failing one
+    got worse. With it, the only way to improve is to move a failing check toward its
+    threshold -- and letting a passing check slip past its threshold always costs more than
+    the 1.0 it was contributing.
+    """
+    return float(sum(max(c.margin, 1.0) for c in checks))
 
 
 def _pitch(q):
@@ -56,11 +103,12 @@ def check_rotation(phases):
     # Drake's qdot = N(q) v mapping, so the error here IS a rotation-rate error. Report it.
     nq = float(np.abs(q[:, 0] ** 2 + q[:, 2] ** 2 - 1.0).max())
     report("quaternion stays unit without being pinned", nq < 1e-4,
-           f"worst |q|^2 - 1 = {nq:.2e}, bound {QUAT_BOX:.0e}")
+           f"worst |q|^2 - 1 = {nq:.2e}, bound {QUAT_BOX:.0e}", nq / 1e-4)
     report("net rotation is one full backflip",
            abs(net + 2 * np.pi) < 1e-3 and worst_reversal < 1e-3,
            f"{np.degrees(net):.4f} deg, worst reversal {np.degrees(worst_reversal):.5f} deg, "
-           f"max |step| {np.degrees(np.abs(np.diff(theta)).max()):.1f} deg")
+           f"max |step| {np.degrees(np.abs(np.diff(theta)).max()):.1f} deg",
+           max(abs(net + 2 * np.pi), worst_reversal) / 1e-3)
 
 
 def check_ballistic(plant, phases):
@@ -82,11 +130,11 @@ def check_ballistic(plant, phases):
                                                                 rcond=None)[0]
     resid_x = com[:, 0] - A @ np.linalg.lstsq(A, com[:, 0], rcond=None)[0]
     err = max(np.abs(resid_z).max(), np.abs(resid_x).max())
-    report("flight CoM is ballistic", err < 1e-3, f"max residual {err:.2e} m")
+    report("flight CoM is ballistic", err < 1e-3, f"max residual {err:.2e} m", err / 1e-3)
 
     drift = np.abs(ang - ang[0]).max()
     report("flight angular momentum conserved", drift < 1e-3,
-           f"L_y = {ang[0][1]:.3f} N.m.s, max drift {drift:.2e}")
+           f"L_y = {ang[0][1]:.3f} N.m.s, max drift {drift:.2e}", drift / 1e-3)
 
 
 def check_contact(phases):
@@ -99,7 +147,8 @@ def check_contact(phases):
         worst_cone = max(worst_cone,
                          (np.linalg.norm(lam[:, :, :2], axis=2) - K.MU_TO * lam[:, :, 2]).max())
     report("contact forces inside the friction cone", worst_cone < 1e-6 and worst_neg > -1e-6,
-           f"worst cone slack {worst_cone:.2e} N, most negative lambda_z {worst_neg:.2e} N")
+           f"worst cone slack {worst_cone:.2e} N, most negative lambda_z {worst_neg:.2e} N",
+           max(worst_cone, -worst_neg) / 1e-6)
 
 
 def check_envelope(phases):
@@ -117,7 +166,7 @@ def check_envelope(phases):
         worst = max(worst, (np.abs(u) - tau_pk).max(),
                     (u + k_ts * qd - tau_stall).max(), (-u - k_ts * qd - tau_stall).max())
     report("torques inside the enforced torque-speed halfplanes", worst < 1e-6,
-           f"worst overshoot {worst:.2e} N.m")
+           f"worst overshoot {worst:.2e} N.m", worst / 1e-6)
 
 
 def check_floor(plant, phases):
@@ -170,7 +219,8 @@ def check_floor(plant, phases):
            f"worst penetration {knot_pen * 1000:+.2f} mm at knots"
            + (f" ({knot_where})" if knot_pen > 0 else "")
            + f", {mid_pen * 1000:+.2f} mm between them"
-           + (f" ({mid_where})" if mid_pen > 0 else ""))
+           + (f" ({mid_where})" if mid_pen > 0 else ""),
+           max(knot_pen, mid_pen) / 2e-3)
     # Separate from penetration, because clearing the floor by 0.1 mm is not the same as
     # clearing it. The trajectory this replaced passed the check above while the rear knee
     # scraped along the ground at launch and the head touched down before the feet did --
@@ -183,7 +233,10 @@ def check_floor(plant, phases):
            min(knot_gap, mid_gap) > BODY_CLEARANCE / 2,
            f"closest non-foot approach {knot_gap * 1000:+.2f} mm at knots ({gap_where}), "
            f"{mid_gap * 1000:+.2f} mm between them ({mid_gap_where}); "
-           f"margin {BODY_CLEARANCE * 1000:.0f} mm")
+           f"margin {BODY_CLEARANCE * 1000:.0f} mm",
+           # A lower bound, so the margin runs the other way: 1.0 exactly at the threshold,
+           # 0.0 at twice the clearance, and above 2.0 once something is actually touching.
+           max(0.0, 2.0 - min(knot_gap, mid_gap) / (BODY_CLEARANCE / 2)))
 
 
 def check_symmetry(phases):
@@ -223,7 +276,7 @@ def check_symmetry(phases):
            mirror < 1e-3 and zero < 1e-3,
            f"worst L/R mismatch {mirror:.2e} rad ({where}), bound {MIRROR:.0e}; "
            f"worst |q| on the zeroed DOFs {zero:.2e} ({zwhere}), "
-           f"bound {SAGITTAL_BOX:.0e}")
+           f"bound {SAGITTAL_BOX:.0e}", max(mirror, zero) / 1e-3)
 
 
 def check_tuck(plant, phases):
@@ -246,7 +299,7 @@ def check_tuck(plant, phases):
     # 0.55 sits between a real tuck (0.45) and merely standing there (0.48 -> 0.66 sprawled).
     report("flight is genuinely tucked", worst < 0.55,
            f"peak I_yy over the tucked knots {worst:.4f} kg.m^2 "
-           f"(tuck pose {0.452:.3f}, standing {0.484:.3f})")
+           f"(tuck pose {0.452:.3f}, standing {0.484:.3f})", worst / 0.55)
 
 
 def check_integration(bp, result, phases):
@@ -256,9 +309,34 @@ def check_integration(bp, result, phases):
     together for three mesh refinements and then stopped, and knowing WHICH phase carries the
     drift is what decides whether the next lever is more flight knots or something else
     entirely (load/absorb are still on the plain kinematic guess, never single-shot).
+
+    Sampled at every knot, not only at the end of the phase. An endpoint-only comparison
+    cannot distinguish a trajectory whose dynamics really are consistent from one whose
+    defects are large but happen to cancel over the phase -- and that distinction decides a
+    real question: burst_38 of the clr_b run has 32 segments over 1e-2 of defect against the
+    shipped point's 12, yet a SMALLER end-of-phase drift. Taking the worst over knots is what
+    prices the excursion in between.
     """
     per_phase = []
-    worst_q, worst_v = 0.0, 0.0
+    # One make_plant() per phase means one re-parse of go2.xml per phase, and every parse
+    # re-emits the same two dozen "unsupported tag" warnings about a file that was already
+    # parsed and reported on at program build. Harmless once; 96 lines that bury the solve
+    # output now that restart_loop audits every burst.
+    drake_log = logging.getLogger("drake")
+    level = drake_log.level
+    drake_log.setLevel(logging.ERROR)
+    try:
+        _integrate(bp, result, phases, per_phase)
+    finally:
+        drake_log.setLevel(level)
+    worst_q = max(q for _, q, _ in per_phase)
+    worst_v = max(v for _, _, v in per_phase)
+    report("collocation matches a tight integrator", worst_q < 5e-3,
+           f"worst in-phase drift {worst_q:.2e} (q), {worst_v:.2e} (v) -- "
+           + ", ".join(f"{n} {q:.1e}/{v:.1e}" for n, q, v in per_phase), worst_q / 5e-3)
+
+
+def _integrate(bp, result, phases, per_phase):
     for p, ph in enumerate(phases):
         u_traj = bp.dc[p].ReconstructInputTrajectory(result)
         builder = DiagramBuilder()
@@ -275,19 +353,20 @@ def check_integration(bp, result, phases):
         plant.SetPositions(ctx, ph["x"][0][XQ])
         plant.SetVelocities(ctx, ph["x"][0][XV])
         sim.Initialize()
-        sim.AdvanceTo(ph["t"][-1] - ph["t"][0])
-
-        dq = float(np.abs(plant.GetPositions(ctx) - ph["x"][-1][XQ]).max())
-        dv = float(np.abs(plant.GetVelocities(ctx) - ph["x"][-1][XV]).max())
+        dq = dv = 0.0
+        for k, tk in enumerate(ph["t"][1:], start=1):
+            sim.AdvanceTo(tk - ph["t"][0])
+            dq = max(dq, float(np.abs(plant.GetPositions(ctx) - ph["x"][k][XQ]).max()))
+            dv = max(dv, float(np.abs(plant.GetVelocities(ctx) - ph["x"][k][XV]).max()))
         per_phase.append((ph["name"], dq, dv))
-        worst_q, worst_v = max(worst_q, dq), max(worst_v, dv)
-    report("collocation matches a tight integrator", worst_q < 5e-3,
-           f"worst end-of-phase drift {worst_q:.2e} (q), {worst_v:.2e} (v) -- "
-           + ", ".join(f"{n} {q:.1e}/{v:.1e}" for n, q, v in per_phase))
 
 
-def run(bp, result, phases) -> bool:
-    print("physics audit:")
+def run(bp, result, phases, quiet=False) -> Audit:
+    global QUIET
+    RESULTS.clear()
+    QUIET = quiet
+    if not quiet:
+        print("physics audit:")
     plant = bp.plant
     check_rotation(phases)
     check_ballistic(plant, phases)
@@ -297,7 +376,11 @@ def run(bp, result, phases) -> bool:
     check_symmetry(phases)
     check_tuck(plant, phases)
     check_integration(bp, result, phases)
-    failed = [n for n, ok, _ in RESULTS if not ok]
-    print(f"  {len(RESULTS) - len(failed)}/{len(RESULTS)} audit checks passed"
-          + (f" -- FAILED: {', '.join(failed)}" if failed else ""))
-    return not failed
+    checks = list(RESULTS)
+    QUIET = False
+    failed = [c.name for c in checks if not c.ok]
+    if not quiet:
+        print(f"  {len(checks) - len(failed)}/{len(checks)} audit checks passed"
+              f", score {score(checks):.3f}"
+              + (f" -- FAILED: {', '.join(failed)}" if failed else ""))
+    return Audit(checks, not failed, score(checks))

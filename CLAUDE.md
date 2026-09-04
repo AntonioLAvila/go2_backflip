@@ -132,6 +132,15 @@ reverting just reproduces the same result forever) explore new territory instead
 raw decision-variable vector is saved to `traj_opt/out/checkpoints/` immediately, since a good
 point is one burst away from being overwritten by a worse one.
 
+**Bursts are ranked by `audit.score`, not by `max_violation`** — the two anti-correlate on this
+problem, hard, and `STATUS.md` has the numbers in both directions (a point at 124x lower
+violation that audits *worse*; a point at 8.6x higher violation that is better on every physics
+check and is what the repo now ships). `max_violation` sees the knots only, so it is blind by
+construction to a cubic that rings between them while satisfying the defects exactly at them.
+`best.npy` is the best-auditing burst and `best_viol.npy` the lowest-violation one, kept so
+runs stay comparable with the older numbers in `STATUS.md`. If you are tempted to rank on the
+violation again, read the 2026-09-04 section first.
+
 **`traj_opt/audit.py`** is the physics check independent of the solver's own reported residuals:
 net rotation, ballistic flight (CoM parabola + angular momentum conservation), friction-cone
 compliance, torque-envelope compliance, and — specific to this transcription — re-simulating
