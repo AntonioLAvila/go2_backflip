@@ -323,6 +323,13 @@ def main() -> int:
                           "same knot counts. Give it different --burst-iters than the run that "
                           "produced it -- IPOPT is deterministic from a fixed start and "
                           "options, so an identical start reproduces the identical chain")
+    ap.add_argument("--no-prepass", action="store_true",
+                    help="With --start-checkpoint: add the cost and go straight into the "
+                         "restart bursts, skipping the feasibility and costed passes. Those "
+                         "two passes are long continuous solves, which is exactly what the "
+                         "burst structure exists to avoid -- seeded with the 16.05-scoring "
+                         "burst_38 they handed the restart loop a 41.97 instead, and the "
+                         "search then spent bursts climbing back to where it started.")
     ap.add_argument("--cost-scale", type=float, default=1.0, metavar="S",
                      help="scale the performance costs (torque, rate, time, tuck) in the "
                           "costed pass. The symmetry cost is never scaled. At the default 1.0 "
@@ -388,12 +395,26 @@ def main() -> int:
         set_guess(bp, g.build(), g.footholds())
 
     make_opts = snopt_options if args.solver == "snopt" else ipopt_options
-    result = solve(bp, make_opts(args.feas_tol, args.opt_tol, args.iters), "feasibility", args.solver)
-    if not args.feasibility_only:
-        bp.add_cost(scale=args.cost_scale)
-        bp.prog.SetInitialGuess(bp.prog.decision_variables(),
-                                result.GetSolution(bp.prog.decision_variables()))
-        result = solve(bp, make_opts(args.feas_tol, args.opt_tol / 10, args.iters), "optimal", args.solver)
+    if args.no_prepass:
+        if not args.start_checkpoint:
+            raise SystemExit("--no-prepass only means anything with --start-checkpoint: "
+                             "without a start point there is nothing to preserve")
+        if not args.restarts:
+            raise SystemExit("--no-prepass with no --restarts would solve nothing at all")
+        if not args.feasibility_only:
+            bp.add_cost(scale=args.cost_scale)
+        # Bit-exact (see result_from_vector), so the restart loop begins on the point that was
+        # handed in rather than on whatever two long continuous solves made of it.
+        result = result_from_vector(bp, x)
+    else:
+        result = solve(bp, make_opts(args.feas_tol, args.opt_tol, args.iters),
+                       "feasibility", args.solver)
+        if not args.feasibility_only:
+            bp.add_cost(scale=args.cost_scale)
+            bp.prog.SetInitialGuess(bp.prog.decision_variables(),
+                                    result.GetSolution(bp.prog.decision_variables()))
+            result = solve(bp, make_opts(args.feas_tol, args.opt_tol / 10, args.iters),
+                           "optimal", args.solver)
 
     if args.restarts and not result.is_success():
         result = restart_loop(bp, make_opts, args.solver, args.feas_tol, args.opt_tol / 10,
