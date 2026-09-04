@@ -34,9 +34,12 @@ knees scrape the floor and its head touches down before its feet do.
 
 ## 2026-09-03 session: the restart loop was throwing away every point it saved
 
-Goal for the session: drive the remaining constraint violations to zero. Not reached -- the
-solve still stalls around viol 5e-2 -- but the reason it stalls is now measured rather than
-guessed, and two of the causes were bugs in how IPOPT was being driven, not in the physics.
+Goal for the session: drive the remaining constraint violations to zero. The violation went
+from 0.0376 to 0.0004 -- 94x -- and **the trajectory got worse**, which is the finding the rest
+of this entry exists to explain. Two real bugs in how IPOPT was being driven were fixed along
+the way and those stand on their own. `out/backflip.npz` is unchanged.
+
+**Read "THE RESULT THAT MATTERS" first.**
 
 ### Where the violation actually is: all of it is collocation defect
 
@@ -128,7 +131,7 @@ This is what IPOPT's behaviour looks like from the inside: Newton steps of norm 
 `alpha ~ 1e-9`, and dual infeasibility of 1e3-1e8 on a problem whose objective is identically
 zero.
 
-### One structural fix landed, one measured and rejected
+### Two structural changes, both measured and both ultimately rejected
 
 **Rejected: pinning the sagittally-zero DOFs as fixed variables.** `q[1]`, `q[3]`, `q[5]` and
 the four hips are exactly zero for a sagittal motion, so `AddBoundingBoxConstraint(0, 0, .)`
@@ -138,15 +141,17 @@ program). It is much worse. Removing the positions as unknowns leaves their own 
 defect rows over-determined in velocity alone, and the guess-level equality nullity goes
 **13 -> 224**. Reverted. Do not re-try this.
 
-**Landed: the left/right mirror is a safety net, not a pin.** `MIRROR = 1e-2` replaces `TIGHT`
-on the thigh/calf mirror. The count is the argument: linearised about a symmetric point the
+**Tried, then reverted: the left/right mirror as a safety net rather than a pin.** `MIRROR`
+was set to 1e-2. It is back at `TIGHT` -- see "THE RESULT THAT MATTERS" above; the counting
+argument below is sound and the violation improved a lot, but the trajectory got worse. The count is the argument: linearised about a symmetric point the
 problem splits into symmetric and antisymmetric halves, and per joint pair per phase the
 antisymmetric half carries 12 mirror rows against 22 defect rows on 24 unknowns -- over-
-determined by 10, which is exactly the observed structure. Nothing is lost, because symmetry is
-already structural (symmetric HOME start, exact per-knot torque mirror, exactly mirrored
-contact forces and touchdown impulses, no asymmetric term in the mechanism). And the old bound
-was **not holding anyway**: the shipped trajectory's worst L/R mismatch measures 2.73e-04 rad,
-nearly 3x outside the 1e-4 box it was supposedly pinned to.
+determined by 10, which is exactly the observed structure. "Nothing is lost, because symmetry is already structural" was the prediction --
+symmetric HOME start, exact per-knot torque mirror, exactly mirrored contact forces and
+impulses, no asymmetric term in the mechanism -- and it was **wrong**: the solve parks 9.9e-3
+of hip splay on whatever bound it is given. A prediction about what the dynamics will carry is
+not a mechanism. (The old bound was not holding exactly either -- the shipped trajectory's
+worst L/R mismatch is 2.73e-04 rad against a 1e-4 box -- but 2.7e-04 is not 9.9e-3.)
 
 `nullity_check.py` reports **13** with the mirror change in place (unchanged from the same
 diagnostic on the pre-change program, so this adds no LICQ risk at the guess).
@@ -173,30 +178,116 @@ diagnostic on the pre-change program, so this adds no LICQ risk at the guess).
   session teardown (that has now cost this project five searches); a transient unit does not
   die with the session and `systemctl --user list-units 'flip-*'` shows what is alive.
 
+### THE RESULT THAT MATTERS: a 124x lower violation audits WORSE
+
+Everything below was chasing the wrong number, and the run that finally proved it is the most
+useful thing this session produced.
+
+With the degeneracy reduced and `bound_push` fixed, the searches got dramatically better at the
+thing they were being scored on. The 400-iteration feasibility pass from the analytic guess
+reached **viol 0.0025** against an all-time best of 0.0376 that used to take 40 restarts and
+hours; growing flight to 34 knots then let a restart chain reach **viol 0.0004**, which is 94x
+below that all-time best and 124x below the shipped 0.0495.
+
+That 0.0004 point audits **7/11**. The shipped 0.0495 point audits **9/11**.
+
+| audit check | shipped, viol 0.0495 | "best", viol 0.0004 |
+|---|---|---|
+| net rotation | PASS | **FAIL** -- 0.131 deg pitch reversal |
+| flight angular momentum | FAIL 7.13e-03 | FAIL 6.35e-03 |
+| sagittal symmetry | PASS 2.7e-04 | **FAIL** 1.0e-02 |
+| collocation vs integrator (flight) | FAIL 3.2e-02 | **FAIL 1.66e-01** |
+| | **9/11** | **7/11** |
+
+The integration drift is 5x WORSE at 80x lower violation, and the pitch now reverses. That
+combination has one explanation: **the solve is finding a spurious discrete solution.** The
+defects are satisfied almost exactly AT the collocation points while the cubic rings between
+them -- which is precisely what Hermite-Simpson admits and precisely what `check_integration`
+exists to catch. More knots gave the ringing more room, and a looser feasible set let the
+optimizer reach it.
+
+**So `max_violation` is not the objective for this project, and optimising it hard is actively
+dangerous.** The audit is the scoreboard. Two of its checks -- integration drift and the
+"without being pinned" pair -- are the only things standing between a low violation number and
+a trajectory that is not physical. Everything a future session does to the formulation has to
+be scored on the audit, on a checkpoint, before it is believed.
+
+### What was reverted, and why each thing looked right first
+
+All of these lowered the violation and none survived the audit:
+
+| change | violation | audit |
+|---|---|---|
+| `MIRROR` / `SAGITTAL_BOX` 1e-4 -> 1e-2 | 400-iter pass ~69 -> **0.0025** | symmetry FAILS: solve parks 9.9e-3 of hip splay on the bound |
+| stance `h_max` +40% | active-set nullity 64 -> 38 | launch integration drift 1.8e-3 -> **1.8e-2** |
+| flight 26 -> 34 knots | 0.0025 -> 0.0028, enabled the 0.0004 chain | enabled the spurious point above |
+| `QUAT_BOX` 1e-4 -> 1e-2 | neutral | neutral (measured 8.5e-6..5e-5) -- reverted for consistency |
+
+The sagittal bound sweep, all at 400 iterations with everything else held, is worth keeping
+because it shows how strong the pull toward the wrong answer was:
+
+| `SAGITTAL_BOX` / `MIRROR` | feasibility pass |
+|---|---|
+| 1e-4 (TIGHT, shipped) | stuck at ~69 |
+| 3e-4 | 0.0541 |
+| 1e-3 | 0.1137 |
+| 1e-2 | **0.0025** |
+
+And no cost recovers the symmetry a loose box gives away. `SYM_COST` at 10 leaves 9.7e-3 of
+wander, at 1000 it leaves 7.2e-3, and the objective RISES during the pass as feasibility
+improves -- so the lateral DOFs are not the free null direction they look like, they are slack
+the solver spends absorbing defect residual. Named, the offender is a hip (0.4-0.6 deg of
+splay), not the base or the quaternion. Two-stage (solve loose, re-impose TIGHT warm-started
+from the loose point) does not rescue it either: from 0.0164 the tight pins go to 0.19-3.06.
+
+### Mesh: flight refinement is available again, stance refinement is not
+
+Recorded because the 2026-09-01 note said the opposite and was reasoning from the old
+formulation. Growing flight no longer blows up -- 34 knots solves to 0.0028 where 32 used to
+stall at 2.13 -- and on a checkpoint at comparable violation it does what the per-segment
+measurement predicted:
+
+| check (both at viol ~0.02) | flight 26 | flight 34 |
+|---|---|---|
+| flight angular momentum drift | 1.26e-02 | **1.25e-03** |
+| flight integration drift, q | 4.7e-02 | **9.4e-03** |
+
+So flight refinement is a real lever on the two failing checks **at a fixed violation level** --
+it is only when the search is then allowed to chase the violation down to 0.0004 that it turns
+into ringing. A future attempt should grow flight AND stop the search early on the audit, not
+on `max_violation`.
+
+Stance refinement is the opposite and should not be retried: launch 12 -> 16/18/20 knots gives
+0.22 / 9.39 / 0.28 against 0.0028. Every extra flight knot adds a defect row and nothing else,
+while every extra stance knot also adds a foot pin, a no-slip row, a friction cone and a
+coupling constraint. 40 flight knots is also too many (0.628).
+
+### And any objective at all costs feasibility
+
+The costed pass at the weights that have always been used walks straight off the manifold: it
+takes 0.0025 to **0.7349** at cost 11.5, and the restart loop then starts 300x worse than the
+point it was handed. `--cost-scale` now scales the four performance terms; at `--cost-scale 0`
+the pass keeps feasibility. None of the four is needed for a valid trajectory -- the tuck is
+guaranteed by the hard `FLIGHT_TUCK` window, not by `w_tuck` -- so they are affordable only
+once feasibility is banked. A proximal term (`--proximal`) has the same problem for the same
+reason and is kept only as a diagnostic.
+
 ### Where this leaves it
 
-The shipped `out/backflip.npz` is unchanged and still the best trajectory the project has:
-viol 0.0495, now **8/10** with the symmetry check added, failing only the two flight-side
-checks that are both restatements of the unconverged defects. The formulation is in better
-shape than it was (one real solver bug fixed, one barrier default understood, the mirror
-redundancy removed) but no run has yet converged, and the honest summary is that the binding
-constraint is IPOPT's ability to converge a degenerate 4934-variable NLP with no exact Hessian.
+`out/backflip.npz` is **unchanged**: viol 0.0495, **9/11**, still the best trajectory the
+project has. The formulation is back where it started apart from the two solver bugs, the
+no-slip de-duplication, and much better diagnostics. What genuinely improved is the
+understanding of what to optimise, and the tooling that can tell.
 
-Next levers, in the order they should be tried:
+Next, in order:
 
-1. **The remaining active-set degeneracy is now the top suspect, and the quaternion-norm box
-   is the piece with no workaround yet.** `1-TIGHT <= q0^2 + q2^2 <= 1+TIGHT` at every knot is
-   *nearly* implied by the defects (Hermite-Simpson conserves the norm to O(h^5)), so it is
-   intrinsically ill-conditioned rather than plainly redundant -- 14.8 units of null energy
-   over 29 active rows. A sagittal base has one rotational DOF; parameterising it by the pitch
-   angle instead of a 2-component quaternion would remove the constraint entirely.
-2. **Variable scaling.** `_scale()` scales lambda and the impulses and nothing else, while the
-   vector spans `h ~ 0.02` to `lambda ~ 2000` and the defect rows' sensitivity to `h` is
-   O(1e3). Measuring the Jacobian's column-norm spread would say whether this is worth it;
-   nobody has looked.
-3. **A converged `is_success()` may still be the wrong target** (this was already item 3 on the
-   previous list and nothing found this session contradicts it). For an RL-imitation reference
-   what matters is primal feasibility and the physics checks, and eight of ten pass.
+1. **Score on the audit, not on `max_violation`.** `restart_loop` keeps the lowest-violation
+   burst; on the evidence above that is the wrong selection rule. It should run `audit.run` on
+   each burst and keep the best-auditing one, or at minimum reject any burst whose integration
+   drift got worse.
+2. **Flight 34 knots, with that selection rule.** It halves both failing checks at a fixed
+   violation level; it only hurt because the search was free to run past the good point.
+3. The two solver findings below (`bound_push`, `mu_strategy`) are unconditional and stay.
 
 ## 2026-09-01 session B: clearing the floor by a margin, not by a hair
 

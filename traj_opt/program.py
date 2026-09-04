@@ -80,62 +80,22 @@ TIGHT = 1e-4
 # opposite of what a push-off does.
 NO_SLIP = 1e-3
 
-# The left/right thigh/calf mirror. At TIGHT this was the single largest term in the active
-# set's rank deficiency at a solved point (83 of 202 units of null-space energy, over 97 active
-# rows), and the count explains itself: linearised about a symmetric point the problem splits
-# into symmetric and antisymmetric halves, and per joint pair per phase the antisymmetric half
-# carries 12 mirror rows against 22 defect rows on 24 unknowns -- over-determined by 10, which
-# is the observed structure. Symmetry does not need those rows: HOME is symmetric, the per-knot
-# torque mirror is an exact equality, contact forces and touchdown impulses are mirrored
-# exactly, and the mechanism has no asymmetric term, so the defects carry it. This is only a
-# safety net against a leak, and audit.py measures the leak directly on all four legs.
-#
-# NOT applied to q[1]/q[3]/q[5] or the hips. Pinning THOSE as fixed variables (lb == ub, which
-# IPOPT eliminates outright) looks like the same idea and is much worse: it removes the
-# positions as unknowns, which leaves their own collocation defect rows over-determined in
-# velocity alone, and the guess-level equality nullity goes 13 -> 224. Measured, not assumed.
-MIRROR = 1e-2
+# The left/right thigh/calf mirror, and the DOFs a sagittal motion holds at zero (quat_x,
+# quat_z, base y, the hips), and the unit-quaternion box. All three were loosened on
+# 2026-09-03 to get them out of the active set, and all three are back at TIGHT, because the
+# thing they bought turned out not to be worth having. See STATUS: loosening them takes the
+# 400-iteration feasibility pass from ~69 to 0.0025 and the best restart to 0.0004, but that
+# number is not the trajectory. At 0.0004 the audit is 7/11 -- WORSE than the 9/11 the shipped
+# 0.0495 trajectory scores -- with flight integration drift of 1.66e-01 against 9.4e-03, and a
+# pitch reversal. The solve is finding a spurious discrete solution: the defects are satisfied
+# almost exactly AT the collocation points while the cubic rings between them. A looser box is
+# a larger feasible set, and most of what the violation number gained was that.
+MIRROR = TIGHT
+SAGITTAL_BOX = TIGHT
+QUAT_BOX = TIGHT
 
-# ...and the same argument, and the same bound, for the DOFs a sagittal motion holds at zero:
-# quat_x, quat_z, base y, and the four hips. Pinning each of them at EVERY knot is the same
-# over-determination -- per DOF per phase, n pin rows on top of the 2n-2 defect rows that
-# already govern the same 2n unknowns -- and it showed up as 34 more units of null-space
-# energy in the active set. What anchors these is _add_boundary, which pins the whole of q at
-# the first knot and the whole of q again at the last, exactly; between those the defects and
-# the mechanism's own sagittal symmetry carry them, and this is the safety net.
-#
-# This is NOT the fixed-variable version that was tried and rejected (see the note below):
-# a loose box keeps the positions as unknowns, which is precisely what keeps their own defect
-# rows from being over-determined in velocity alone.
-SAGITTAL_BOX = 1e-2
 
-# ...and a cost to keep the box above from being ridden, which at 1e-2 it was: the first solve
-# on the loosened formulation put 8.57e-3 of lateral wander on the zeroed DOFs, right against
-# the bound. The lesson is the one BODY_CLEARANCE already taught -- the optimizer spends every
-# millimetre it is allowed, and "the dynamics will carry it" is a prediction, not a mechanism.
-# The lateral subsystem is a genuine null direction of a sagittal motion (nothing forces it
-# either way), so any positive weight collapses it, and a weight is the right instrument
-# because it leaves the bound INACTIVE, which is the whole point of not pinning it.
-#
-# It lives in add_cost(), NOT in the constructor, and that placement is measured rather than
-# stylistic: on this problem ANY objective during the feasibility pass costs feasibility. The
-# same 400-iteration pass reaches 0.0025 with a zero objective and 0.0109 with this one -- 4x
-# worse for a term that is only tidying a null direction. So the feasibility pass stays empty
-# and the costed pass, which starts from its result, is what collapses the wander.
-SYM_COST = 10.0
 
-# And once more for the unit-quaternion box. This one is not redundant in the algebra -- the
-# exact flow conserves |q| but Hermite-Simpson only conserves it to O(h^5) -- which makes it
-# NEARLY dependent on the defects, and near-dependence is the harder kind to see: it degrades
-# the conditioning without ever showing up as a row anyone can point at. (It is not what the
-# active-set check flags; that turned out to be the time steps on h_max. This is loosened on
-# the sizing argument alone, and audit.py measures what the defects then deliver.) Size the
-# error rather than guess it: the half-angle turns at ~6 rad/s, so the fifth derivative is ~6^5 and the local
-# norm error is h^5 * 6^5 / 2880 ~ 2e-8 per step, a few times 1e-7 over a whole phase -- three
-# orders under the 1e-4 this box was holding. Both ends of the trajectory pin q exactly
-# (_add_boundary), so the defects carry the norm between them and this is the safety net that
-# catches gross drift. audit.py reports the norm error it actually achieves.
-QUAT_BOX = 1e-2
 
 # Generous, physically-loose upper bounds -- go2 weighs ~149 N total, so these are 10-25x a
 # static single-foot share, never expected to bind, just there to give IPOPT's interior-point
@@ -505,18 +465,6 @@ class BackflipProgram:
             self.prog.AddBoundingBoxConstraint([t_lo, c_lo, t_lo, c_lo], [t_hi, c_hi, t_hi, c_hi],
                                                [q[8], q[9], q[14], q[15]])
 
-    def _add_symmetry_cost(self):
-        """Collapse the lateral null direction instead of bounding it. See SYM_COST."""
-        terms = []
-        for p, ph in enumerate(PHASES):
-            for k in range(ph.n_knots):
-                q = self.state(p, k)[XQ]
-                terms += [q[1] ** 2, q[3] ** 2, q[5] ** 2]
-                terms += [q[7 + j] ** 2 for j in K.HIP_IDX]
-                for a, b in ((0, 3), (6, 9)):
-                    terms += [(q[7 + a + d] - q[7 + b + d]) ** 2 for d in (1, 2)]
-        self.prog.AddQuadraticCost(SYM_COST * sum(terms))
-
     @staticmethod
     def _mirror_contact_pairs(ph):
         idx = {f: i for i, f in enumerate(ph.contacts)}
@@ -641,7 +589,20 @@ class BackflipProgram:
             self.prog.SetVariableScaling(var, LAMBDA_SCALE * 0.1)
 
     # --- cost ----------------------------------------------------------------
-    def add_cost(self, w_torque=1.0, w_rate=0.1, w_time=1.0, w_tuck=0.5):
+    def add_cost(self, w_torque=1.0, w_rate=0.1, w_time=1.0, w_tuck=0.5, scale=1.0):
+        """Performance costs, scaled by `scale`; the symmetry cost is NOT scaled.
+
+        `scale` exists because at full weight this pass is not affordable. Measured: the
+        feasibility pass reaches viol 0.0025 and the costed pass that starts from it ends at
+        0.7349 with cost 11.5 -- it walks straight off the feasible manifold, and the restart
+        loop then begins 300x worse than the point it was handed. None of these four terms is
+        needed for a valid trajectory (the tuck is guaranteed by the hard FLIGHT_TUCK window,
+        not by w_tuck); they buy smoothness and effort for the RL stage that consumes this.
+        The symmetry term is the one the audit actually requires, so it is deliberately
+        outside the scaling and survives at scale=0.
+        """
+        w_torque, w_rate = scale * w_torque, scale * w_rate
+        w_time, w_tuck = scale * w_time, scale * w_tuck
         inv = 1.0 / K.torque_limits() ** 2
         for p, ph in enumerate(PHASES):
             # Per-interval steps now, so the running cost has to integrate against the actual
@@ -668,5 +629,3 @@ class BackflipProgram:
                    for k in range(TUCK_RAMP, PHASES[FLIGHT].n_knots - TUCK_RAMP)
                    for j, t in ((8, tgt[0]), (9, tgt[1]), (14, tgt[0]), (15, tgt[1])))
         self.prog.AddCost(w_tuck * tuck)
-
-        self._add_symmetry_cost()

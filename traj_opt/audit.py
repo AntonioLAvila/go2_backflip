@@ -189,31 +189,41 @@ def check_floor(plant, phases):
 def check_symmetry(phases):
     """Sagittal symmetry, measured rather than assumed.
 
-    The program no longer pins the left/right thigh/calf mirror tightly at every knot -- at
-    TIGHT that pin was over-determined against the collocation defects by 10 rows per joint
-    pair per phase, and it dominated the active set's rank deficiency. What enforces symmetry
-    now is the structure: a symmetric HOME start, an exact per-knot torque mirror, mirrored
-    contact forces and impulses, and a mechanism with no asymmetric term. MIRROR is only a
-    safety net. That makes an independent check of the thing being relied on mandatory, not
-    optional -- so measure both halves of it: the mirror itself, and the DOFs held at zero.
+    The bounds that assert it are back at TIGHT, but this check stays, because it is what
+    priced the experiment that loosened them: with a 1e-2 box the solve parks 9.9e-3 of splay
+    on a hip, and no symmetry cost tried (weight 10 through 1000) pulled it off -- the wander
+    is not a free null direction, it is slack the solver spends absorbing defect residual.
+    Both halves are measured: the left/right mirror, and the DOFs held at zero.
     """
-    zero, mirror, where = 0.0, 0.0, ""
+    # Named, because "worst |q| on the zeroed DOFs" lumps together a quaternion component
+    # (radians of roll/yaw, doubled), a base displacement (metres sideways) and a hip angle,
+    # and 1e-2 means something different in each. Which one is drifting decides whether the
+    # number is cosmetic or not.
+    ZEROED = {1: "quat_x", 3: "quat_z", 5: "base_y",
+              7: "FL_hip", 10: "FR_hip", 13: "RL_hip", 16: "RR_hip"}
+    zero, mirror, where, zwhere = 0.0, 0.0, "", ""
     for ph in phases:
         q = ph["x"][:, XQ]
-        zero = max(zero, float(np.abs(q[:, [1, 3, 5, 7, 10, 13, 16]]).max()))
+        for j, nm in ZEROED.items():
+            m = float(np.abs(q[:, j]).max())
+            if m > zero:
+                zero, zwhere = m, f"{nm} at t={ph['t'][np.abs(q[:, j]).argmax()]:.3f}s"
         for a, b in ((0, 3), (6, 9)):
             for d in (1, 2):
                 diff = np.abs(q[:, 7 + a + d] - q[:, 7 + b + d])
                 if diff.max() > mirror:
                     mirror = float(diff.max())
                     where = f"joint {a + d} vs {b + d} at t={ph['t'][diff.argmax()]:.3f}s"
-    # A tenth of the safety net: at that level the mirror is being carried by the dynamics, as
-    # intended, rather than by the bound. Riding the bound would mean the motion genuinely
-    # wants to be asymmetric and the check should fail loudly.
+    # Absolute thresholds, deliberately not a fraction of the bound. Tying them to MIRROR /
+    # SAGITTAL_BOX would make the check re-scale itself every time those move, so it would
+    # have passed the 2026-09-03 loosened run (9.9e-3 of hip splay) for the same reason it
+    # passes the pinned one, and measured nothing. 1e-3 rad is ~0.06 deg of splay and 1e-3 m
+    # is a millimetre of lateral drift: what the hardware stage can actually live with.
     report("sagittal symmetry holds without being pinned",
-           mirror < MIRROR / 10 and zero < SAGITTAL_BOX / 10,
+           mirror < 1e-3 and zero < 1e-3,
            f"worst L/R mismatch {mirror:.2e} rad ({where}), bound {MIRROR:.0e}; "
-           f"worst |q| on the zeroed DOFs {zero:.2e}, bound {SAGITTAL_BOX:.0e}")
+           f"worst |q| on the zeroed DOFs {zero:.2e} ({zwhere}), "
+           f"bound {SAGITTAL_BOX:.0e}")
 
 
 def check_tuck(plant, phases):

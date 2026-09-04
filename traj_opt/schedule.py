@@ -26,24 +26,23 @@ class Phase:
     h_max: float
 
 
-# h_max on the three STANCE phases was raised 2026-09-03, and the reason is worth keeping.
-# At the old values every one of them sat exactly on its bound -- load 0.0200/0.0200,
-# launch 0.0200/0.0200, absorb 0.0249999/0.0250 -- i.e. the solve wanted longer stance than
-# the schedule allowed, which is physically unsurprising (more time on the ground is more
-# impulse at a fixed torque limit). That costs twice over. It caps the phase duration, and,
-# because AddEqualTimeIntervalsConstraints also ties a phase's steps to each other, it puts
-# 11 active bounds on top of 10 equalities over 11 variables -- over-determined by 10 per
-# phase, and together the two largest families in the active set's rank deficiency.
-# Flight is left alone: at 0.0244 against a 0.032 cap it is the one phase already choosing
-# its own step, because its duration is ballistic and set by the takeoff velocity, not by a
-# bound. The raise is deliberately moderate; local integration error grows like h^5, and
-# load's is 1.3e-4 against a 5e-3 audit threshold, so ~40% of step is affordable and much
-# more would not be.
+# h_max on the three stance phases was raised to 0.028/0.028/0.033 on 2026-09-03 and put back.
+# The raise was well motivated -- every stance phase sat exactly on its bound, so the solve
+# wanted more ground time than the schedule allowed, and the bound being active also stacked
+# 11 active rows on 10 equal-interval equalities over 11 variables. It is reverted because the
+# cost showed up where the audit looks: launch's end-of-phase integration drift goes 1.8e-3 at
+# h_max 0.020 to 1.8e-2 at 0.028, and drift is a check that fails while the h_max degeneracy
+# only affected a violation number that turned out not to track trajectory quality.
+#
+# Flight stays at 26. 34 knots was tried on the fixed formulation and it SOLVES (0.0028, where
+# the old formulation stalled at 2.13 growing to 32) -- but the extra freedom is what let the
+# search reach the spurious 0.0004 point that audits 7/11. Growing flight is available again;
+# it is just not obviously wanted.
 PHASES = (
-    Phase("load", ALL, 12, 0.004, 0.028),
-    Phase("launch", ("RL", "RR"), 12, 0.004, 0.028),
+    Phase("load", ALL, 12, 0.004, 0.020),
+    Phase("launch", ("RL", "RR"), 12, 0.004, 0.020),
     Phase("flight", (), 26, 0.004, 0.032),
-    Phase("absorb", ALL, 16, 0.004, 0.033),
+    Phase("absorb", ALL, 16, 0.004, 0.025),
 )
 
 FLIGHT = 2

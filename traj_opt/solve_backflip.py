@@ -269,6 +269,11 @@ def main() -> int:
                           "same knot counts. Give it different --burst-iters than the run that "
                           "produced it -- IPOPT is deterministic from a fixed start and "
                           "options, so an identical start reproduces the identical chain")
+    ap.add_argument("--cost-scale", type=float, default=1.0, metavar="S",
+                     help="scale the performance costs (torque, rate, time, tuck) in the "
+                          "costed pass. The symmetry cost is never scaled. At the default 1.0 "
+                          "the costed pass walks off the feasible manifold (0.0025 -> 0.73); "
+                          "use 0 for a symmetry-only pass that keeps feasibility")
     ap.add_argument("--proximal", type=float, default=0.0, metavar="W",
                      help="add W*||x - seed||^2 (per-variable normalised) to the objective, "
                           "with the seed from --start-checkpoint. Regularises the degenerate "
@@ -331,7 +336,7 @@ def main() -> int:
     make_opts = snopt_options if args.solver == "snopt" else ipopt_options
     result = solve(bp, make_opts(args.feas_tol, args.opt_tol, args.iters), "feasibility", args.solver)
     if not args.feasibility_only:
-        bp.add_cost()
+        bp.add_cost(scale=args.cost_scale)
         bp.prog.SetInitialGuess(bp.prog.decision_variables(),
                                 result.GetSolution(bp.prog.decision_variables()))
         result = solve(bp, make_opts(args.feas_tol, args.opt_tol / 10, args.iters), "optimal", args.solver)
