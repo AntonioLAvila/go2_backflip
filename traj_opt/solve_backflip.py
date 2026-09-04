@@ -190,11 +190,16 @@ def restart_loop(bp: BackflipProgram, make_opts, solver: str, feas_tol: float, o
     def rank(res):
         """(audit score, violation) for one point. Lexicographic: violation only breaks ties.
 
-        A burst can be bad enough that extract/audit throws -- a non-unit quaternion the
-        integrator refuses, a phase whose duration went non-positive. That is a legitimate
-        "worst possible" answer, not a crash worth losing the search over.
+        A burst can be bad enough that this throws -- a phase whose duration went
+        non-positive, or an all-zero quaternion, which Drake refuses to convert to a rotation
+        matrix. That is a legitimate "worst possible" answer, not a crash worth losing a
+        40-burst search over, so max_violation is inside the guard too: it evaluates every
+        constraint at the point, so it throws on exactly the same degeneracies the audit does.
         """
-        viol = max_violation(bp.prog, res)
+        try:
+            viol = max_violation(bp.prog, res)
+        except Exception as e:                                  # noqa: BLE001
+            return (float("inf"), float("inf")), f"unevaluable ({type(e).__name__}: {e})"
         try:
             a = audit.run(bp, res, extract(bp, res), quiet=True)
             return (a.score, viol), f"viol={viol:.4f} audit={a}"
