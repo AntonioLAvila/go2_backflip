@@ -15,7 +15,7 @@ from pydrake.systems.framework import DiagramBuilder
 from pydrake.systems.primitives import ConstantVectorSource, TrajectorySource
 
 from go2_backflip import constants as K
-from program import BODY_CLEARANCE, make_plant, TUCK_RAMP, XQ, XV
+from program import BODY_CLEARANCE, make_plant, MIRROR, TUCK_RAMP, XQ, XV
 from schedule import FLIGHT, PHASES
 
 G = 9.81
@@ -179,6 +179,35 @@ def check_floor(plant, phases):
            f"margin {BODY_CLEARANCE * 1000:.0f} mm")
 
 
+def check_symmetry(phases):
+    """Sagittal symmetry, measured rather than assumed.
+
+    The program no longer pins the left/right thigh/calf mirror tightly at every knot -- at
+    TIGHT that pin was over-determined against the collocation defects by 10 rows per joint
+    pair per phase, and it dominated the active set's rank deficiency. What enforces symmetry
+    now is the structure: a symmetric HOME start, an exact per-knot torque mirror, mirrored
+    contact forces and impulses, and a mechanism with no asymmetric term. MIRROR is only a
+    safety net. That makes an independent check of the thing being relied on mandatory, not
+    optional -- so measure both halves of it: the mirror itself, and the DOFs held at zero.
+    """
+    zero, mirror, where = 0.0, 0.0, ""
+    for ph in phases:
+        q = ph["x"][:, XQ]
+        zero = max(zero, float(np.abs(q[:, [1, 3, 5, 7, 10, 13, 16]]).max()))
+        for a, b in ((0, 3), (6, 9)):
+            for d in (1, 2):
+                diff = np.abs(q[:, 7 + a + d] - q[:, 7 + b + d])
+                if diff.max() > mirror:
+                    mirror = float(diff.max())
+                    where = f"joint {a + d} vs {b + d} at t={ph['t'][diff.argmax()]:.3f}s"
+    # A tenth of the safety net: at that level the mirror is being carried by the dynamics, as
+    # intended, rather than by the bound. Riding the bound would mean the motion genuinely
+    # wants to be asymmetric and the check should fail loudly.
+    report("sagittal symmetry holds without being pinned", mirror < MIRROR / 10,
+           f"worst L/R mismatch {mirror:.2e} rad ({where}), bound {MIRROR:.0e}; "
+           f"worst |q| on the zeroed DOFs {zero:.2e}")
+
+
 def check_tuck(plant, phases):
     """The flip has to actually tuck: report peak flight I_yy about the CoM.
 
@@ -247,6 +276,7 @@ def run(bp, result, phases) -> bool:
     check_contact(phases)
     check_envelope(phases)
     check_floor(plant, phases)
+    check_symmetry(phases)
     check_tuck(plant, phases)
     check_integration(bp, result, phases)
     failed = [n for n, ok, _ in RESULTS if not ok]

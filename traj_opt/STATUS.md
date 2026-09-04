@@ -1,16 +1,23 @@
 # Backflip trajectory optimization — status
 
-Last updated 2026-09-01 (second session that day). Not yet converged
+Last updated 2026-09-03. Not yet converged
 (`is_success()==False`), and it may never need to be — see next steps. Best
 confirmed result: IPOPT, unscaled constraint violation **0.0495**, on the
 26-knot-flight problem with the 10 mm body-clearance margin, audited at
-**7/9 checks passing**, shipped as `out/backflip.npz` and reproducible from
+**8/10 checks passing** (a symmetry check was added 2026-09-03), shipped as `out/backflip.npz` and reproducible from
 `out/checkpoints_backflip_clr_b/best_0495.npy` with `--from-checkpoint`.
 The previous best (0.0376, 6/8, no clearance margin) is kept as
 `out/backflip_noclearance_0376.npz` — it is *better converged* but its rear
 knees scrape the floor and its head touches down before its feet do.
 
-> **Read the 2026-09-01 session B section FIRST**, then the one below it.
+> **Read the 2026-09-03 section FIRST.** It supersedes the two below on one point that
+> matters before any further solving: the remaining violation is *entirely* collocation
+> defect, the mesh is not short, and two of the reasons the solver could not converge were
+> bugs in how IPOPT was being driven (`bound_push` wrecking every restart's seed; Drake's
+> `adaptive` barrier default silently disabling `mu_init`). It also records one structural
+> change that was measured and rejected -- do not re-try fixed-variable symmetry pins.
+>
+> **Then read the 2026-09-01 session B section**, then the one below it.
 >
 > **Read the 2026-09-01 section next.** It supersedes the 2026-08-25 one: the
 > floor clipping and the missing tuck are fixed and measured (−71.6 mm → −0.2 mm,
@@ -24,6 +31,172 @@ knees scrape the floor and its head touches down before its feet do.
 > including to the submodule's own fork remote — the "uncommitted working
 > tree, one accident from data loss" state flagged in the previous note is
 > resolved. See git log for the commit.
+
+## 2026-09-03 session: the restart loop was throwing away every point it saved
+
+Goal for the session: drive the remaining constraint violations to zero. Not reached -- the
+solve still stalls around viol 5e-2 -- but the reason it stalls is now measured rather than
+guessed, and two of the causes were bugs in how IPOPT was being driven, not in the physics.
+
+### Where the violation actually is: all of it is collocation defect
+
+Grouping every binding at the shipped point (`best_0495.npy`) by constraint family and taking
+the worst residual in each:
+
+| family | worst residual |
+|---|---|
+| collocation defects | **3.05e-02** |
+| coupling (`input == B u + sum J^T lambda`) | 6.41e-04 |
+| impact (impulsive touchdown) | 1.50e-04 |
+| no-slip (stance foot vertical velocity) | 1.85e-04 |
+| foot pins / floor clearance / friction cone / torque envelope | <= 6.8e-05 |
+
+**Every physical constraint is already satisfied to better than 1e-3.** The 0.0495 headline
+number is entirely the transcription's own defects, which is why the two failing audit checks
+are both flight-side: they are not separate problems, they are that one number seen twice.
+
+### The mesh was never the problem -- 26 knots was the wrong thing to blame
+
+Per flight segment, the defect residual next to what a tight-tolerance integrator does over
+that same single interval:
+
+| flight segment | defect (v) | one-interval integration error (v) | (q) |
+|---|---|---|---|
+| 0 | 3.43e-02 | 6.14e-02 | 2.14e-03 |
+| 5 | 3.05e-02 | 1.31e-02 | 7.39e-04 |
+| **16** | **5.60e-04** | **9.93e-05** | **2.97e-06** |
+| 24 | 3.09e-03 | 4.10e-02 | 2.09e-03 |
+
+The local error tracks the defect residual roughly 1:1, and segments 15-17 -- the ones that
+happen to be converged -- integrate to 1e-5 in q. That is what Hermite-Simpson truncation
+actually costs at h = 24 ms here, and it is ~1000x below the audit's 5e-3 threshold. So the
+2026-09-01 negative result on 26 -> 32 knots was right to be reverted but was read backwards:
+growing the mesh failed because the mesh was never short, it just made a harder NLP. **Knot
+count is not a lever on either remaining audit failure. Convergence is the only lever.**
+
+### Bug 4: IPOPT's default `bound_push` was destroying the start of every restart burst
+
+`restart_loop` chains forward by `SetInitialGuess(x)` and re-solving. IPOPT moves any variable
+sitting within `bound_push` of a bound into the interior *before iteration 0*, and at the
+default 0.01 that move is not small here:
+
+| `bound_push` | viol at iteration 0 | variables moved | max abs move |
+|---|---|---|---|
+| **1e-2 (default)** | **1.68e+01** | 282 | 4.54e-01 |
+| 1e-3 | 1.67e+00 | 210 | 4.54e-02 |
+| 1e-4 | 1.57e-01 | 192 | 4.52e-03 |
+| 1e-6 | 4.95e-02 | 59 | 1.88e-05 |
+| 1e-8 | **4.9465e-02 (exact)** | 0 | 0 |
+
+The damage is linear in the setting, ~1675x it. 282 variables sit on bounds at any good point
+here -- launch torques against their +-45 N.m limit above all -- so **every burst in every
+restart search this project has run re-entered IPOPT from a point ~340x worse than the one it
+had just saved to disk.** That is almost certainly what "IPOPT reliably wanders away from good
+points once it finds them" always was. Fixed in `ipopt_options`: `bound_push`, `bound_frac`,
+`slack_bound_push`, `slack_bound_frac` all 1e-8.
+
+Fixing it alone does not converge the problem (a 300-iteration feasibility pass from the
+shipped point still drifts 0.0495 -> 0.1293), because it trades one problem for another: at
+1e-8 from a bound the barrier multipliers `mu/(x - x_L)` are ~1e7, and IPOPT reports dual
+infeasibility in the thousands *on a zero-objective problem*. The complete warm start needs a
+small `mu` as well, which leads directly to:
+
+### Bug 5: Drake defaults IPOPT to `mu_strategy = adaptive`, silently disabling `mu_init`
+
+Three chains launched with different barrier options produced **bit-identical iterates**, which
+looked at first like Drake dropping the options. It is not dropping them: under `adaptive`,
+`mu_init` is unused and re-setting `adaptive` is a no-op, so both null results have the same
+one cause. Forcing `mu_strategy=monotone` makes `mu_init` take effect immediately and visibly
+(`lg(mu)` reads -6.0 at iteration 1 for `mu_init=1e-6`). Worth knowing before spending another
+run on a barrier option: **on this Drake build `mu_init` does nothing unless `monotone` is set
+alongside it.** `--ipopt-opt KEY=VALUE` (repeatable) now exists on `solve_backflip.py` so a
+barrier setting can be tested without editing the file.
+
+### The active set at a solved point is rank-deficient -- nullity 202, cond 5e20
+
+`nullity_check.py` has only ever tested the *initial guess*, and only *exact equalities*. That
+is the right check for "will IPOPT refuse to start" and it cannot see what stalls the solve:
+once the optimizer drives the iterate onto a TIGHT box, that box is an active inequality and is
+back in the KKT system, rank-deficient against the defects that already imply it. Measured at
+`best_0495`, stacking equalities plus genuinely-active inequalities:
+
+- **nullity 202 of 4672 rows**, smallest singular values at 1e-16, cond(A) = 5.5e20
+- 83 of the null-space energy on the left/right thigh/calf mirror (97 active rows)
+- 25.2 on the `q[1]/q[3]/q[5]` TIGHT box, 9.3 on the hip pins, 14.8 on the quaternion-norm box
+
+This is what IPOPT's behaviour looks like from the inside: Newton steps of norm 6e5 cut back to
+`alpha ~ 1e-9`, and dual infeasibility of 1e3-1e8 on a problem whose objective is identically
+zero.
+
+### One structural fix landed, one measured and rejected
+
+**Rejected: pinning the sagittally-zero DOFs as fixed variables.** `q[1]`, `q[3]`, `q[5]` and
+the four hips are exactly zero for a sagittal motion, so `AddBoundingBoxConstraint(0, 0, .)`
+looks strictly better than a TIGHT box -- IPOPT eliminates a fixed variable outright (it is
+already doing this for 154 of them, which is why it reports 4780 variables for a 4934-variable
+program). It is much worse. Removing the positions as unknowns leaves their own collocation
+defect rows over-determined in velocity alone, and the guess-level equality nullity goes
+**13 -> 224**. Reverted. Do not re-try this.
+
+**Landed: the left/right mirror is a safety net, not a pin.** `MIRROR = 1e-2` replaces `TIGHT`
+on the thigh/calf mirror. The count is the argument: linearised about a symmetric point the
+problem splits into symmetric and antisymmetric halves, and per joint pair per phase the
+antisymmetric half carries 12 mirror rows against 22 defect rows on 24 unknowns -- over-
+determined by 10, which is exactly the observed structure. Nothing is lost, because symmetry is
+already structural (symmetric HOME start, exact per-knot torque mirror, exactly mirrored
+contact forces and touchdown impulses, no asymmetric term in the mechanism). And the old bound
+was **not holding anyway**: the shipped trajectory's worst L/R mismatch measures 2.73e-04 rad,
+nearly 3x outside the 1e-4 box it was supposedly pinned to.
+
+`nullity_check.py` reports **13** with the mirror change in place (unchanged from the same
+diagnostic on the pre-change program, so this adds no LICQ risk at the guess).
+
+### Diagnostics fixed along the way
+
+- **`nullity_check.py` now eliminates fixed variables the way IPOPT does** -- zero their
+  columns, drop the rows left empty -- and reports how many. Without this it counts rows IPOPT
+  never sees; the first version of the rejected change above read 312 instead of 12. It also
+  means the historic "15/4424" and today's "13/4268" are different accountings, not a change in
+  the program.
+- **`audit.py` gains a tenth check: sagittal symmetry**, measured on all four legs plus the
+  zeroed DOFs, and required to hold at a tenth of `MIRROR`. Loosening a bound without measuring
+  what it was protecting is how the grazing knee got shipped; this is that lesson applied in
+  advance. Passes at 2.73e-04 rad on the shipped trajectory.
+- **`--proximal W`** adds `W*||x - seed||^2` (normalised per variable). A pure feasibility pass
+  leaves the objective flat across the ~200-dimensional degenerate subspace, which gives the
+  limited-memory quasi-Newton approximation nothing to resolve it with; a proximal term makes
+  the reduced Hessian the identity there. On its own, with adaptive mu, it does not hold the
+  point (two chains wandered to inf_pr 0.21 and 0.35); paired with `monotone` + small `mu_init`
+  it holds ~57 iterations before IPOPT drops into its restoration phase.
+- **Launch long runs as systemd user services**, not `setsid nohup`: `systemd-run --user
+  --collect --unit=flip-x -p StandardOutput=file:... `. `setsid` was *still* losing runs to
+  session teardown (that has now cost this project five searches); a transient unit does not
+  die with the session and `systemctl --user list-units 'flip-*'` shows what is alive.
+
+### Where this leaves it
+
+The shipped `out/backflip.npz` is unchanged and still the best trajectory the project has:
+viol 0.0495, now **8/10** with the symmetry check added, failing only the two flight-side
+checks that are both restatements of the unconverged defects. The formulation is in better
+shape than it was (one real solver bug fixed, one barrier default understood, the mirror
+redundancy removed) but no run has yet converged, and the honest summary is that the binding
+constraint is IPOPT's ability to converge a degenerate 4934-variable NLP with no exact Hessian.
+
+Next levers, in the order they should be tried:
+
+1. **The remaining active-set degeneracy is now the top suspect, and the quaternion-norm box
+   is the piece with no workaround yet.** `1-TIGHT <= q0^2 + q2^2 <= 1+TIGHT` at every knot is
+   *nearly* implied by the defects (Hermite-Simpson conserves the norm to O(h^5)), so it is
+   intrinsically ill-conditioned rather than plainly redundant -- 14.8 units of null energy
+   over 29 active rows. A sagittal base has one rotational DOF; parameterising it by the pitch
+   angle instead of a 2-component quaternion would remove the constraint entirely.
+2. **Variable scaling.** `_scale()` scales lambda and the impulses and nothing else, while the
+   vector spans `h ~ 0.02` to `lambda ~ 2000` and the defect rows' sensitivity to `h` is
+   O(1e3). Measuring the Jacobian's column-norm spread would say whether this is worth it;
+   nobody has looked.
+3. **A converged `is_success()` may still be the wrong target** (this was already item 3 on the
+   previous list and nothing found this session contradicts it). For an RL-imitation reference
+   what matters is primal feasibility and the physics checks, and eight of ten pass.
 
 ## 2026-09-01 session B: clearing the floor by a margin, not by a hair
 
@@ -914,11 +1087,11 @@ to the analytic guess; (4) nullity after each change — done, 15/4424 and 16/47
 | `traj_opt/schedule.py` | phase table — flight **26 knots** (grown 14→20→26; 32 tried 2026-09-01 and reverted, much worse), `h_max` 0.055→0.040→0.032 | — |
 | `tools/check_npz.py` | geometric review of a saved `.npz`: exact lowest point of every collision geom, closest **non-foot** approach, flight I_yy, net pitch — measures the file that gets replayed, not the solver's residuals | done; found the stale output, the between-knot floor bulge, and the grazing knee/head |
 | `traj_opt/program.py` | the NLP: constraints, all fixed bugs live here; `BODY_CLEARANCE` = 10 mm for non-foot witness spheres, 0 for the two foot spheres | builds cleanly, nullity **15/4424** at the 26-knot size (unchanged by the clearance margin — it moved an inequality bound only), not yet solved |
-| `traj_opt/nullity_check.py` | FD-Jacobian/SVD LICQ diagnostic — found bugs 1-3 | done, rerun after any constraint-family change |
+| `traj_opt/nullity_check.py` | FD-Jacobian/SVD LICQ diagnostic — found bugs 1-3; now eliminates fixed variables the way IPOPT does before taking the rank | done, rerun after any constraint-family change. **13** at the 26-knot size. Only ever checks the GUESS and only exact equalities — for what stalls a solve, check the active set at the solved point instead (2026-09-03: nullity 202, cond 5e20) |
 | `traj_opt/guess.py` | analytic initial guess, single-shooting launch/flight, knot-count-generic (no changes needed to run at any flight size) | done, best IPOPT result yet at 14 knots (violation 5.7 pre-restart, 0.0298-0.0308 post-restart); at 20 knots starts at violation 83 pre-solve |
 | `traj_opt/warm_start.py` | mesh-refinement warm-start: export a solved phase's continuous reconstruction resampled at a new knot count, `--warm-start` flag on `solve_backflip.py` | done, but wrong tool for 14→20 (resampling an under-resolved source gave violation 586, worse than the plain analytic guess's 83) — keep for refining an already-smooth solution (e.g. a later 20→26) |
-| `traj_opt/solve_backflip.py` | CLI, `--solver ipopt\|snopt`, `--feas-tol`, `--opt-tol`, `--restarts`/`--burst-iters`, `--warm-start` | `extract()` 3D-`GetSolution` bug fixed; restart-from-checkpoint is a real feature; `result_from_vector()` added for inspecting raw checkpoints without a fresh solve |
-| `traj_opt/audit.py` | post-solve physics audit, **9 checks** | ninth check added: closest non-foot approach vs `BODY_CLEARANCE`, because penetration-below-zero could not see a geom grazing the floor at 0.1 mm; torque-envelope check fixed to test `torque_speed_halfplanes` (was testing the wrong, intentionally-divergent bound); rotation-check tolerances loosened to the solve's own scale (were tighter than any non-`is_success()` result could ever pass) |
+| `traj_opt/solve_backflip.py` | CLI, `--solver ipopt\|snopt`, `--feas-tol`, `--opt-tol`, `--restarts`/`--burst-iters`, `--warm-start`, `--ipopt-opt KEY=VALUE`, `--proximal W` | `extract()` 3D-`GetSolution` bug fixed; restart-from-checkpoint is a real feature; `result_from_vector()` added for inspecting raw checkpoints without a fresh solve; `bound_push` fixed at 1e-8 (2026-09-03 -- the default was costing every restart burst its seed) |
+| `traj_opt/audit.py` | post-solve physics audit, **10 checks** | tenth check added 2026-09-03: sagittal symmetry, measured on all four legs, because `MIRROR` loosened the bound that used to assert it. Ninth check: closest non-foot approach vs `BODY_CLEARANCE`, because penetration-below-zero could not see a geom grazing the floor at 0.1 mm; torque-envelope check fixed to test `torque_speed_halfplanes` (was testing the wrong, intentionally-divergent bound); rotation-check tolerances loosened to the solve's own scale (were tighter than any non-`is_success()` result could ever pass) |
 | `traj_opt/replay.py`, `traj_opt/mj_divergence.py` | meshcat playback, MuJoCo open-loop divergence (TODO-10) | untested end-to-end, no solve has reached `is_success()` yet |
 
 Run with:

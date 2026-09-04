@@ -80,6 +80,22 @@ TIGHT = 1e-4
 # opposite of what a push-off does.
 NO_SLIP = 1e-3
 
+# The left/right thigh/calf mirror. At TIGHT this was the single largest term in the active
+# set's rank deficiency at a solved point (83 of 202 units of null-space energy, over 97 active
+# rows), and the count explains itself: linearised about a symmetric point the problem splits
+# into symmetric and antisymmetric halves, and per joint pair per phase the antisymmetric half
+# carries 12 mirror rows against 22 defect rows on 24 unknowns -- over-determined by 10, which
+# is the observed structure. Symmetry does not need those rows: HOME is symmetric, the per-knot
+# torque mirror is an exact equality, contact forces and touchdown impulses are mirrored
+# exactly, and the mechanism has no asymmetric term, so the defects carry it. This is only a
+# safety net against a leak, and audit.py measures the leak directly on all four legs.
+#
+# NOT applied to q[1]/q[3]/q[5] or the hips. Pinning THOSE as fixed variables (lb == ub, which
+# IPOPT eliminates outright) looks like the same idea and is much worse: it removes the
+# positions as unknowns, which leaves their own collocation defect rows over-determined in
+# velocity alone, and the guess-level equality nullity goes 13 -> 224. Measured, not assumed.
+MIRROR = 1e-2
+
 # Generous, physically-loose upper bounds -- go2 weighs ~149 N total, so these are 10-25x a
 # static single-foot share, never expected to bind, just there to give IPOPT's interior-point
 # method a finite barrier region on every variable (see the TIGHT comment above).
@@ -381,8 +397,8 @@ class BackflipProgram:
                     self.prog.AddLinearConstraint(u[a] + u[b] == 0.0)
                     for d in (1, 2):
                         diff = q[7 + a + d] - q[7 + b + d]
-                        self.prog.AddLinearConstraint(-TIGHT <= diff)
-                        self.prog.AddLinearConstraint(diff <= TIGHT)
+                        self.prog.AddLinearConstraint(-MIRROR <= diff)
+                        self.prog.AddLinearConstraint(diff <= MIRROR)
                         self.prog.AddLinearConstraint(u[a + d] == u[b + d])
                 for i, j in self._mirror_contact_pairs(ph):
                     self.prog.AddLinearConstraint(self.lam[p][k][i, 0] == self.lam[p][k][j, 0])

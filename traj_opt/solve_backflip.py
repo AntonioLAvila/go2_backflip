@@ -40,6 +40,12 @@ def set_guess(bp: BackflipProgram, g: list[dict], footholds, impulse=None):
                             impulse if impulse is not None else np.tile([0.0, 0.0, 12.0], (4, 1)))
 
 
+# Extra IPOPT options from --ipopt-opt, applied last so they can override anything below.
+# The two failing audit checks are both proxies for unconverged collocation defects (see
+# STATUS.md), so the levers that matter now are IPOPT's own, not the transcription's.
+IPOPT_EXTRA: dict[str, object] = {}
+
+
 def ipopt_options(feas: float, opt: float, iters: int) -> SolverOptions:
     o = SolverOptions()
     sid = IpoptSolver.id()
@@ -52,7 +58,20 @@ def ipopt_options(feas: float, opt: float, iters: int) -> SolverOptions:
     # so IPOPT must build its own quasi-Newton approximation instead of the exact one it
     # defaults to expecting.
     o.SetOption(sid, "hessian_approximation", "limited-memory")
+    # IPOPT moves any variable sitting within bound_push of a bound into the interior BEFORE
+    # iteration 0. At the default 0.01 that move is catastrophic here: re-entering from the
+    # best known point measured viol 0.0495 -> 16.76, because 282 variables sit on bounds at
+    # any good point (launch torques on their +-45 N.m limit, foot pins, the quaternion
+    # boxes). The damage is linear in the setting -- 1e-3 -> 1.67, 1e-4 -> 0.157 -- and at
+    # 1e-8 the point survives bit-for-bit. This matters most for restart_loop, which chains
+    # forward by re-solving from the previous burst's vector: every burst was starting ~340x
+    # worse than the point it had just saved, which is what "IPOPT reliably wanders away from
+    # good points" turned out to be.
+    for k in ("bound_push", "bound_frac", "slack_bound_push", "slack_bound_frac"):
+        o.SetOption(sid, k, 1e-8)
     o.SetOption(sid, "print_level", 5)
+    for k, v in IPOPT_EXTRA.items():
+        o.SetOption(sid, k, v)
     return o
 
 
@@ -80,6 +99,30 @@ def solve(bp: BackflipProgram, options, label: str, solver: str = "ipopt"):
           f"cost={result.get_optimal_cost():.4f} viol={max_violation(bp.prog, result):.4f} "
           f"in {time.time() - t0:.1f}s")
     return result
+
+
+def add_proximal_cost(bp: BackflipProgram, x_ref: np.ndarray, weight: float):
+    """min ||x - x_ref||^2 alongside the constraints, instead of a flat feasibility problem.
+
+    --feasibility-only leaves the objective identically zero, and on THIS problem that is a
+    liability rather than a simplification: the active set at a solved point is rank-deficient
+    by ~200 (cond(A) = 5e20, measured), so there is a large subspace the constraints do not
+    pin down, and a flat objective gives IPOPT's limited-memory quasi-Newton approximation
+    nothing at all to resolve it with -- which is what a 6e5-norm Newton step cut back to
+    alpha ~ 1e-9 looks like. A proximal term makes the reduced Hessian the identity on exactly
+    that subspace, and it pulls toward a point already known to be physically good.
+
+    Weighted per variable by 1/max(1, x_ref)^2, because the vector spans h ~ 0.02 to lambda
+    ~ 200 and a uniform weight would be a de-facto constraint on the contact forces alone.
+    Added in blocks: one binding per variable would put 4934 of them in every evaluation, and
+    a single dense 4934x4934 Q is 195 MB.
+    """
+    v = bp.prog.decision_variables()
+    scale = weight / np.maximum(1.0, np.abs(x_ref)) ** 2
+    for i in range(0, v.size, 250):
+        blk = slice(i, min(i + 250, v.size))
+        bp.prog.AddQuadraticErrorCost(np.diag(scale[blk]), x_ref[blk], v[blk])
+    print(f"proximal cost: weight {weight:g} toward the seed, {(v.size + 249) // 250} blocks")
 
 
 def result_from_vector(bp: BackflipProgram, x: np.ndarray):
@@ -218,6 +261,13 @@ def main() -> int:
                           "same knot counts. Give it different --burst-iters than the run that "
                           "produced it -- IPOPT is deterministic from a fixed start and "
                           "options, so an identical start reproduces the identical chain")
+    ap.add_argument("--proximal", type=float, default=0.0, metavar="W",
+                     help="add W*||x - seed||^2 (per-variable normalised) to the objective, "
+                          "with the seed from --start-checkpoint. Regularises the degenerate "
+                          "null space that a pure feasibility pass leaves flat")
+    ap.add_argument("--ipopt-opt", action="append", default=[], metavar="KEY=VALUE",
+                     help="extra IPOPT option, repeatable; ints/floats are parsed as such, "
+                          "everything else passed as a string (e.g. mu_strategy=adaptive)")
     ap.add_argument("--out", type=Path, default=OUT,
                      help="where to write the trajectory (default traj_opt/out/backflip.npz)")
     ap.add_argument("--warm-start", type=str, default=None,
@@ -225,6 +275,17 @@ def main() -> int:
                           "(a resampled prior solve/checkpoint) instead of guess.py's "
                           "analytic guess -- for mesh-refinement continuation")
     args = ap.parse_args()
+
+    for kv in args.ipopt_opt:
+        k, _, v = kv.partition("=")
+        for cast in (int, float, str):
+            try:
+                IPOPT_EXTRA[k] = cast(v)
+                break
+            except ValueError:
+                continue
+    if IPOPT_EXTRA:
+        print(f"ipopt: {IPOPT_EXTRA}")
 
     bp = BackflipProgram()
     print(f"program: {bp.prog.num_vars()} vars, {len(bp.prog.GetAllConstraints())} constraints")
@@ -249,6 +310,8 @@ def main() -> int:
         x = load_checkpoint(args.start_checkpoint)
         bp.prog.SetInitialGuess(bp.prog.decision_variables(), x)
         print(f"seeded from {args.start_checkpoint.name}")
+        if args.proximal:
+            add_proximal_cost(bp, x, args.proximal)
     elif args.warm_start:
         import warm_start
         g, footholds, impulse = warm_start.load(args.warm_start)

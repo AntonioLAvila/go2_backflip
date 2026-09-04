@@ -6,6 +6,13 @@ TIGHT boxes) at the current initial guess, SVD, and look at nullity = rows - ran
 violation shows up as near-zero singular values; the left singular vectors for those point back
 at exactly which rows are redundant.
 
+FIXED VARIABLES ARE ELIMINATED FIRST, because IPOPT eliminates them: a BoundingBoxConstraint
+with lb == ub becomes a parameter under the default fixed_variable_treatment, and neither the
+variable nor its bound reaches the KKT system (IPOPT reports 4780 variables for this
+4934-variable program for exactly this reason). Counting them as rows instead reports a nullity
+that IPOPT never sees -- it read 312 rather than 12 the first time Q_ZERO was pinned this way.
+So: zero the fixed columns out of every row, then drop the rows that are left empty.
+
 AddBoundingBoxConstraint/AddLinearConstraint carry no description in program.py, and
 DirectCollocation names each phase's own state variables "x(i)" starting from 0 independently
 per phase, so raw variable names collide across phases and are useless for grouping. Monkeypatch
@@ -22,7 +29,7 @@ import sys
 from collections import defaultdict
 
 import numpy as np
-from pydrake.solvers import MathematicalProgram
+from pydrake.solvers import BoundingBoxConstraint, MathematicalProgram
 
 _counters: dict[str, int] = defaultdict(int)
 
@@ -62,8 +69,23 @@ def main() -> int:
         print(f"WARNING: {np.isnan(x0).sum()} nan entries in initial guess -- filling with 0")
         x0 = np.nan_to_num(x0)
 
+    # Pass 1: which variables does IPOPT eliminate? A variable is fixed if ANY bounding box
+    # on it has lb == ub (Drake intersects several boxes on the same variable into one bound
+    # pair, which is how the release lambda_z == 0 ends up fixed despite also carrying a
+    # [0, LAMBDA_MAX] box).
+    fixed = np.zeros(bp.prog.num_vars(), dtype=bool)
+    for b in bp.prog.GetAllConstraints():
+        ev = b.evaluator()
+        if not isinstance(ev, BoundingBoxConstraint):
+            continue
+        same = np.abs(ev.upper_bound() - ev.lower_bound()) < 1e-12
+        if np.any(same):
+            fixed[np.array(bp.prog.FindDecisionVariableIndices(b.variables()))[same]] = True
+    print(f"fixed variables eliminated (as IPOPT does): {int(fixed.sum())}")
+
     rows, labels = [], []
     n_eq_bindings = 0
+    n_empty = 0
     eps = 1e-6
 
     for b in bp.prog.GetAllConstraints():
@@ -89,11 +111,16 @@ def main() -> int:
                 continue
             full_row = np.zeros(bp.prog.num_vars())
             full_row[idx] = J[r]
+            full_row[fixed] = 0.0
+            if not np.any(full_row):
+                n_empty += 1          # the row IPOPT never sees: 0 == 0 after elimination
+                continue
             rows.append(full_row)
             labels.append(f"{desc}[{r}]")
 
-    M = np.array(rows)
-    print(f"equality bindings: {n_eq_bindings}, rows: {M.shape[0]}, cols touched: {M.shape[1]}")
+    M = np.array(rows)[:, ~fixed]
+    print(f"equality bindings: {n_eq_bindings}, rows: {M.shape[0]} "
+          f"({n_empty} empty after elimination), free cols: {M.shape[1]}")
 
     s = np.linalg.svd(M, compute_uv=False)
     tol = s.max() * max(M.shape) * np.finfo(float).eps * 100
