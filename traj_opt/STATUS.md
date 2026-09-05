@@ -2,14 +2,18 @@
 
 Last updated 2026-09-04. Not yet converged
 (`is_success()==False`), and it may never need to be — see next steps. Best
-confirmed result: IPOPT, **9/11 audit checks passing, worst failure 3.6x over
-its threshold**, on the
-26-knot-flight problem with the 10 mm body-clearance margin, shipped as
-`out/backflip.npz` and reproducible from
-`out/checkpoints_backflip_clr_b/best_audit_b38.npy` with `--from-checkpoint`.
+confirmed result: IPOPT, **10/11 audit checks passing, worst failure 1.61x
+over its threshold**, violation 0.1287, on the **50**-knot-flight problem with
+the 10 mm body-clearance margin, shipped as `out/backflip.npz` and reproducible
+from `out/checkpoints_backflip_k50/best_10of11.npy` with `--from-checkpoint`.
+The collocation-vs-integrator check, which had failed in every session this file
+records, now passes; only flight angular momentum is left.
 
-**The headline number changed on 2026-09-04 from constraint violation to audit
-the audit, and the shipped trajectory changed with it.** Its violation is 0.4259 —
+**The headline number changed on 2026-09-04 from constraint violation to the
+audit**, and the shipped trajectory changed twice that day — first to the 26-knot
+`burst_38`, then to the 50-knot solve above, which is better on the violation *as
+well*, the first time the two criteria have agreed. The note that follows
+describes the first of those changes. `burst_38`'s violation was 0.4259 —
 8.6x the 0.0495 of the point it replaced — and it is better than that point on
 every physics measure there is: half the flight angular-momentum drift, 2.7x
 less integration drift, an order of magnitude less CoM residual, and no pitch
@@ -46,6 +50,84 @@ knees scrape the floor and its head touches down before its feet do.
 > including to the submodule's own fork remote — the "uncommitted working
 > tree, one accident from data loss" state flagged in the previous note is
 > resolved. See git log for the commit.
+## 2026-09-04 (later): 50 flight knots — 10/11, the best trajectory this project has produced
+
+Refining the flight mesh works. `out/backflip.npz` is now a **50-flight-knot** solve, violation
+**0.1287**, **10 of 11 audit checks passing**, with the one failure — flight angular momentum —
+**1.61x** over its threshold. Reproduce with `--from-checkpoint
+out/checkpoints_backflip_k50/best_10of11.npy`.
+
+The collocation-vs-integrator check, which has failed in every session this file records,
+**passes**: worst in-phase drift 3.44e-03 against a 5e-3 bound, with flight itself at 3.2e-03,
+down from 1.8e-02 at 26 knots.
+
+| check | 26 knots (`burst_38`) | 50 knots (shipped) |
+|---|---|---|
+| flight angular momentum | 3.44e-3 (3.44x) | **1.61e-3 (1.61x)** |
+| collocation vs integrator | 1.81e-2 (3.62x) | **3.44e-3 (PASSES)** |
+| flight CoM ballistic | 4.27e-05 | **1.43e-05** |
+| max rotation per interval | 14.1 deg | **9.1 deg** |
+| `max_violation` | 0.4259 | **0.1287** |
+| audit | 9/11, worst 3.62x | **10/11, worst 1.61x** |
+
+Better on every line, `max_violation` included — the first time in this file that ranking on the
+audit and ranking on the violation have agreed.
+
+### `TUCK_RAMP` was a fixed knot count, and that is why 50 knots stalled at first
+
+`guess.py` ramps the tuck over the first and last 20% of flight *time*, and its comment requires
+`TUCK_RAMP` to be at least that as a fraction of flight *knots*. `TUCK_RAMP` was the literal
+integer **6** — which is 0.23 at the 26 knots it was written for, but 0.17 at 36 and **0.12** at
+50. Above 26 knots the guess therefore starts outside the hard tuck window at exactly the knots
+that window constrains.
+
+The symptom was unmistakable once looked for: the first 50-knot attempt sat at `inf_pr` 2.05e2
+for 45 iterations with step sizes of ~1e-5, while the 36-knot run next to it was moving. It is
+now `ceil(0.23 * PHASES[FLIGHT].n_knots)`, which reproduces 6 exactly at 26 knots and gives 12
+at 50. **Any future mesh change must keep this a fraction.**
+
+### Three meshes do not give a convergence order — they are three different solutions
+
+The plan was to run 36 and 50 together and read the observed order off the pair, to decide
+whether the wall was mesh resolution or the quaternion representation. That does not work, and
+the numbers say why:
+
+| flight knots | intervals | flight drift | angular momentum | audit |
+|---|---|---|---|---|
+| 26 | 25 | 1.8e-2 | 3.44e-3 | 9/11, 3.62x |
+| 36 | 35 | **1.9e-2** | 1.41e-3 | 9/11, 3.78x |
+| 50 | 49 | **3.2e-3** | 1.61e-3 | 10/11, 1.61x |
+
+Non-monotonic in *both* error columns: 36 knots is no better than 26 on drift, and it is better
+than 50 on angular momentum. Each run is a cold start that lands in its own local solution, so
+the difference between two rows mixes the mesh effect with the basin effect and cannot separate
+them. A real order study has to refine the mesh *around a single trajectory* — interpolate a
+converged solution onto a finer mesh and re-converge it — not solve three independent problems.
+Do not quote an order from this table.
+
+### Cost, and the LICQ check at the new size
+
+6566 decision variables against 4934 at 26 knots (+33%), 3954 constraints. Each restart burst of
+300 iterations takes ~10 minutes rather than ~3. `nullity_check.py` reports **16** at 50 knots
+against 13 at 26 — the same `_add_boundary` / `_add_stitching` families, no new degeneracy class,
+and IPOPT never raised `TOO_FEW_DOF`.
+
+### What is left
+
+One check. Flight angular momentum, 1.61e-3 against a 1e-3 bound. In flight there is no contact
+and joint torques are internal forces, so this quantity is conserved *exactly* as a matter of
+physics — the residual is pure transcription error and nothing else. Options, in the order I
+would try them:
+
+- **More flight knots still.** Cheapest to try, and the only lever with direct evidence behind
+  it. But the table above shows the per-run scatter is comparable to the gap being closed, so a
+  single 64- or 76-knot run will not be conclusive on its own.
+- **A proper mesh-refinement study around the shipped solution**, per the section above. This is
+  what would actually tell us whether more knots converges or asymptotes.
+- **The quaternion representation.** `DirectCollocation` cubic-interpolates the state as a flat
+  vector, including the four quaternion components, which is not interpolation on SO(3). At 50
+  knots the base still turns 9.1 deg per interval. If refinement asymptotes, this is why.
+
 ## 2026-09-04 session: scoring on the audit found a better trajectory in checkpoints we already had
 
 The 2026-09-03 session ended on the finding that `max_violation` is the wrong objective: a

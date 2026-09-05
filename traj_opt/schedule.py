@@ -41,7 +41,7 @@ class Phase:
 PHASES = (
     Phase("load", ALL, 12, 0.004, 0.020),
     Phase("launch", ("RL", "RR"), 12, 0.004, 0.020),
-    Phase("flight", (), 26, 0.004, 0.032),
+    Phase("flight", (), 50, 0.004, 0.032),
     Phase("absorb", ALL, 16, 0.004, 0.025),
 )
 

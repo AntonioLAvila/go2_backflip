@@ -85,7 +85,8 @@ same constants so they can't diverge except in the one place they're meant to (t
 quadrant).
 
 **`traj_opt/program.py`** builds `BackflipProgram`: one shared `MathematicalProgram` holding
-four `pydrake.planning.DirectCollocation` phases (`traj_opt/schedule.py` has the phase table —
+four `pydrake.planning.DirectCollocation` phases (`traj_opt/schedule.py` has the phase table; flight is at 50 knots as of 2026-09-04 and
+`program.py`'s `TUCK_RAMP` is a *fraction* of that count, not a fixed integer — keep it one —
 load/launch/flight/absorb, contact sets, knot counts). The trick that makes contact forces work
 as decision variables is the input port choice: `applied_spatial_force` is abstract-valued and
 can't be a DirectCollocation input, but `applied_generalized_force` is vector-valued (18) and

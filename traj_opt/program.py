@@ -13,6 +13,8 @@ constraints below bind at knots only. solve_backflip.py measures what that costs
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 from pydrake.math import eq
 from pydrake.multibody.parsing import Parser
@@ -49,7 +51,13 @@ FOOT_CLEARANCE = 0.02
 BODY_CLEARANCE = 0.010
 BASE_Z_MIN = 0.20        # torso half-diagonal is 0.196 m, so this clears the floor at any pitch
 WY_MAX = 20.0            # rad/s; also keeps the per-step half-angle far from the pi that aliases
-TUCK_RAMP = 6            # flight knots at each end left free to fold in / extend out again
+# Flight knots at each end left free to fold in / extend out again -- a FRACTION of the phase,
+# not a fixed count. guess.py ramps the tuck over the first and last 20% of flight time and
+# requires this to be at least that as a fraction of knots, or the guess starts outside the hard
+# tuck window at exactly the knots that window covers. It was 6, which is 0.23 at the 26 knots it
+# was written for but only 0.12 at 50 -- and at 50 the solve stalled, inf_pr flat for 45
+# iterations. ceil(0.23 * n) reproduces the old value exactly at 26 knots.
+TUCK_RAMP = math.ceil(0.23 * PHASES[FLIGHT].n_knots)
 X_LAND_MAX = 0.15
 LAMBDA_SCALE = 200.0
 
