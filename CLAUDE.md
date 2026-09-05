@@ -79,6 +79,13 @@ uv run tools/check_envelope.py
 # Promote a solved checkpoint to the tracked reference trajectory (re-audits, refuses a
 # regression unless --force):
 uv run tools/ship.py traj_opt/out/checkpoints_<run>/best.npy --note "why"
+
+# Mesh refinement. Export FIRST, while schedule.py still matches the checkpoint, then edit the
+# knot count, then solve from the export. Refine on a 2n-1 grid (see below).
+uv run traj_opt/warm_start.py --checkpoint traj_opt/reference/backflip.npy \
+        --out traj_opt/out/refine/warm99.npz --flight-knots 99
+# ...now set flight to 99 in schedule.py...
+uv run traj_opt/solve_backflip.py --warm-start traj_opt/out/refine/warm99.npz --restarts 8
 ```
 
 No test suite exists; `verify_parity.py`, `check_envelope.py`, and the audit in
@@ -164,6 +171,25 @@ each phase with a tight-tolerance integrator to price the error introduced by He
 first-order-hold of the *generalized force* (so the contact term at collocation points is the
 average of endpoint `J^T lambda`, not `J(q_col)^T lambda_col`; contact constraints themselves
 bind at knots only).
+
+**`traj_opt/warm_start.py`** is mesh refinement, and two things about it are load-bearing.
+**Refine on a `2n-1` grid**, so the new knots are a superset of the old: flight torques swing
+~13 N.m between adjacent knots on this problem, so a grid that does not retain the old
+breakpoints distorts the first-order-held input badly (50→76 leaves the guess at violation 587;
+the bisection 50→99 gives 10.8). And **nothing may re-time a knot** — `set_guess` must set
+`dc.state(k)`/`input(k)`/`time_step(k)` per knot rather than calling
+`dc.SetInitialTrajectory`, which derives one uniform `h` and resamples at `i*h`. Solved grids
+are never uniform: `AddEqualTimeIntervalsConstraints` is a chain of adjacent equalities with
+nothing bounding the accumulated drift, so flight `h` spans 17%, and substituting uniform `h`
+into the shipped point takes it from violation 0.1287 to 152. Those bugs made every warm start
+this repo ever ran silently wrong, and hid for two weeks because `guess.py`'s analytic grid
+*is* uniform, so the cold-start path was immune. The round trip is the regression test: export
+a solution at its own knot count and it must come back bit-exact.
+
+Refinement is not, however, a way to buy accuracy here. 50→99 moved the one failing audit check
+(flight angular momentum) by 5%, where 4th-order convergence predicted 16x, because at
+violation ~0.14 the discretization error is an order of magnitude below the residual
+infeasibility. See `traj_opt/STATUS.md`, 2026-09-05.
 
 Solver preference: IPOPT over SNOPT for this contact-rich problem (SNOPT has never once
 returned success here). Both are still runnable via `--solver`.
