@@ -13,7 +13,6 @@ constraints below bind at knots only. solve_backflip.py measures what that costs
 
 from __future__ import annotations
 
-import math
 
 import numpy as np
 from pydrake.math import eq
@@ -53,11 +52,22 @@ BASE_Z_MIN = 0.20        # torso half-diagonal is 0.196 m, so this clears the fl
 WY_MAX = 20.0            # rad/s; also keeps the per-step half-angle far from the pi that aliases
 # Flight knots at each end left free to fold in / extend out again -- a FRACTION of the phase,
 # not a fixed count. guess.py ramps the tuck over the first and last 20% of flight time and
-# requires this to be at least that as a fraction of knots, or the guess starts outside the hard
-# tuck window at exactly the knots that window covers. It was 6, which is 0.23 at the 26 knots it
-# was written for but only 0.12 at 50 -- and at 50 the solve stalled, inf_pr flat for 45
-# iterations. ceil(0.23 * n) reproduces the old value exactly at 26 knots.
-TUCK_RAMP = math.ceil(0.23 * PHASES[FLIGHT].n_knots)
+# requires this to be at least that as a fraction of the phase, or the guess starts outside the
+# hard tuck window at exactly the knots that window covers. It was 6, which is 0.23 at the 26
+# knots it was written for but only 0.12 at 50 -- and at 50 the solve stalled, inf_pr flat for
+# 45 iterations.
+#
+# The fraction is of INTERVALS, not knots. What has to stay fixed as the mesh changes is the
+# span of the phase the window covers, and a ramp of r knots spans r/(n-1) of the phase. Using
+# r/n instead moves the window: bisecting 50 -> 99 gave ceil(0.23*99) = 23, a window of
+# 0.2347..0.7653 against the source's 0.2449..0.7551, so the first and last hard-tucked knots
+# landed half an interval outside where the source solution had ramped to. In a warm start that
+# showed up as the two largest collocation defects in the whole guess (18.02 at segments 74/75
+# and 9.90 at 22/23, both straddling exactly those knots). The interval form gives 24 there,
+# which is 2*12 -- the bisection of the source window, exactly. It reproduces every value the
+# knot form ever produced: 6 at 26 knots, 12 at 50, 18 at 76.
+TUCK_FRAC = 12 / 49     # the 50-knot window, which is the 26-knot window to within a knot
+TUCK_RAMP = round(TUCK_FRAC * (PHASES[FLIGHT].n_knots - 1))
 X_LAND_MAX = 0.15
 LAMBDA_SCALE = 200.0
 

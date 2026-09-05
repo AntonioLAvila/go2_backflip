@@ -125,8 +125,14 @@ def _shoot(ts, gen_old, x_old, t_new, nq):
 
     out = np.empty((len(t_new), x_old.shape[1]))
     # searchsorted(side="right") - 1 is the source interval each new time falls in; a new time
-    # sitting exactly on a source knot resolves to that knot, i.e. a zero-length shot.
-    src_of = np.clip(np.searchsorted(ts, t_new, side="right") - 1, 0, len(ts) - 2)
+    # sitting exactly on a source knot resolves to that knot, i.e. a zero-length shot. The
+    # upper clip is len(ts)-1, NOT len(ts)-2: t_new[-1] lands exactly on the final source knot,
+    # and clipping to the last INTERVAL instead sends it through a full shot across that
+    # interval rather than pinning it. That is the one knot the flight->absorb stitching
+    # constraint reads, and it was coming out 4.3e-2 off while every other knot was exact.
+    # Whenever tk is strictly past ts[i] the index is below the last by construction, so the
+    # shot below never indexes out of range.
+    src_of = np.clip(np.searchsorted(ts, t_new, side="right") - 1, 0, len(ts) - 1)
     for j, tk in enumerate(t_new):
         i = src_of[j]
         if np.isclose(tk, ts[i], rtol=0.0, atol=1e-12):

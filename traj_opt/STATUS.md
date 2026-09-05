@@ -114,6 +114,41 @@ segments at each end of flight, i.e. it is all input-resampling error, not state
 Nullity at 50 knots is **16 / 5756 rows**, in line with the 15-16 recorded before, so none of
 this introduced an LICQ degeneracy.
 
+### TUCK_RAMP was a fraction of knots; it needed to be a fraction of intervals
+
+Refining exposed an off-by-one that only shows up when the mesh changes. `TUCK_RAMP` was
+`ceil(0.23 * n_knots)`, but what has to stay fixed as the mesh changes is the *span of the
+phase* the hard-tuck window covers, and a ramp of `r` knots spans `r/(n-1)` of the phase, not
+`r/n`. Bisecting 50 -> 99 gave 23, a window of 0.2347..0.7653 against the source's
+0.2449..0.7551 -- so the first and last hard-tucked knots landed half an interval outside where
+the source solution had actually ramped to, and those two knots produced the two largest
+collocation defects in the entire guess (18.02 at segments 74/75, 9.90 at 22/23, each pair
+straddling exactly one of them).
+
+`round(TUCK_FRAC * (n - 1))` with `TUCK_FRAC = 12/49` gives 24 at 99 knots -- which is 2*12,
+the bisection of the source window, exactly -- and reproduces every value the knot form ever
+produced: 6 at 26, 12 at 50, 18 at 76. It cannot affect `nullity_check`: both uses of
+`TUCK_RAMP` are a bounding box and a cost, and nullity only examines exact equalities.
+
+Effect on the 50 -> 99 guess, with nothing else changed:
+
+| | violation | flight L drift | flight integration drift | L/R symmetry |
+|---|---|---|---|---|
+| knot-based ramp (23) | 18.02 | 1.76e-2 | 7.0e-2 | 7.24e-2 rad |
+| interval-based ramp (24) | 10.77 | 6.15e-3 | 1.6e-2 | 2.06e-3 rad |
+
+Also fixed: `_shoot` clipped the source-interval index to `len(ts)-2`, so the new grid's final
+time -- which lands exactly on the last source knot -- was shot across the whole last interval
+instead of being pinned, leaving that one knot 4.3e-2 off while all 49 others were exact. It is
+the knot the flight->absorb stitching reads. Pinning it does not change the violation (the
+4.3e-2 is the source's own end-of-flight drift: integrating from the second-to-last knot lands
+that far from the solved last knot either way), but the guess is now exactly the source
+solution wherever the two meshes coincide, which is the property that makes the round trip
+checkable at all.
+
+Knot-to-knot consistency of the 99-knot guess across flight, integrating each knot forward to
+the next through the guess's own force: **median 5.4e-5**, max 4.3e-2 at that final segment.
+
 ## 2026-09-04 (later): 50 flight knots — 10/11, the best trajectory this project has produced
 
 Refining the flight mesh works. `out/backflip.npz` is now a **50-flight-knot** solve, violation
