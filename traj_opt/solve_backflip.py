@@ -27,9 +27,22 @@ RATE = 500.0
 def set_guess(bp: BackflipProgram, g: list[dict], footholds, impulse=None):
     for p, ph in enumerate(PHASES):
         t = g[p]["t"]
-        bp.dc[p].SetInitialTrajectory(
-            PiecewisePolynomial.FirstOrderHold(t, g[p]["gen"].T),
-            PiecewisePolynomial.FirstOrderHold(t, g[p]["x"].T))
+        # Set the knots directly rather than via dc.SetInitialTrajectory. That helper derives
+        # ONE uniform h = duration/(N-1) and then samples both trajectories at i*h, ignoring
+        # how `t` is actually spaced -- so it silently re-times every knot of any guess whose
+        # grid is not uniform. A solved grid is never uniform: AddEqualTimeIntervalsConstraints
+        # is a chain of adjacent equalities, each satisfied to ~1e-4 with nothing bounding the
+        # accumulated drift, so the shipped 50-knot flight phase runs h from 0.011469 to
+        # 0.013467, 17% off. Substituting uniform h into that point and changing nothing else
+        # takes it from violation 0.13 to 152, and round-tripping it through the old
+        # SetInitialTrajectory path gave 321 -- which is what made warm_start.py look like it
+        # could not refine a mesh. guess.py's analytic `t` IS uniform, so the cold-start path
+        # is unaffected either way.
+        for k in range(ph.n_knots):
+            bp.prog.SetInitialGuess(bp.dc[p].state(k), g[p]["x"][k])
+            bp.prog.SetInitialGuess(bp.dc[p].input(k), g[p]["gen"][k])
+        for k, hk in enumerate(np.diff(t)):
+            bp.prog.SetInitialGuess(bp.dc[p].time_step(k), [hk])
         bp.prog.SetInitialGuess(bp.u[p], g[p]["u"])
         if ph.contacts:
             n = ph.n_knots

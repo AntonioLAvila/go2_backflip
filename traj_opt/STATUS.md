@@ -50,6 +50,70 @@ knees scrape the floor and its head touches down before its feet do.
 > including to the submodule's own fork remote — the "uncommitted working
 > tree, one accident from data loss" state flagged in the previous note is
 > resolved. See git log for the commit.
+## 2026-09-05: warm_start.py never worked, and it was three re-timing bugs
+
+`warm_start.py` has been in the repo since 2026-08-23 with a docstring promising that a phase
+whose knot count is unchanged "round-trips through this essentially exactly". It did not. Fed
+the shipped 50-knot point and asked for the same 50 knots back, it returned a guess at
+**violation 321** that audits **7/11**, against the source's own 0.1287 and 10/11.
+
+That is why the 2026-08-23 session concluded mesh refinement "isn't a free lunch" and why the
+Files table still says warm_start is the "wrong tool for 14->20 (resampling an under-resolved
+source gave violation 586)". The source's resolution was never the problem. **Every warm start
+this repo has ever attempted was being silently re-timed**, and the effect is the same whether
+the source is under-resolved or excellent.
+
+Three bugs, all the same shape -- knots ending up at times other than the ones their states
+were computed for:
+
+1. **`set_guess` threw the time grid away.** It passed the guess to
+   `dc.SetInitialTrajectory(u_traj, x_traj)`, which derives ONE uniform `h = duration/(N-1)`
+   and then samples both trajectories at `i*h`. A solved grid is never uniform:
+   `AddEqualTimeIntervalsConstraints` is a chain of adjacent equalities `h_k == h_k+1`, each
+   satisfied to ~1e-4, with **nothing bounding the accumulated drift**. The shipped flight
+   phase runs `h` from 0.011469 to 0.013467 -- 17% off uniform across 49 intervals.
+   Substituting uniform `h` into the shipped point and changing nothing else takes it from
+   **violation 0.1287 to 152.3**. Fixed by setting `dc.state(k)`, `dc.input(k)` and
+   `dc.time_step(k)` per knot directly. guess.py's analytic `t` is uniform, so the cold-start
+   path is unaffected either way -- which is exactly why this hid for two weeks.
+2. **`export` resampled onto `np.linspace`**, a uniform grid, for the same reason. Now it
+   interpolates the source grid against index fraction, which reproduces it exactly when the
+   knot count is unchanged and preserves its shape when it grows.
+3. **`export` sampled Drake's reconstruction spline.** The knots of a solved phase are a
+   genuine trajectory -- `audit.check_integration` confirms it at 3.2e-3 -- but the cubic
+   through them is only an interpolant, and it is not the trajectory between knots. Sampling
+   it broke sagittal symmetry from 2.8e-4 to 3.1e-2 rad. States now come from re-shooting the
+   true dynamics through the source's own first-order-held generalized force.
+
+After all three: the round trip is **exact**. 0.128651, 10/11, worst 1.61x -- the shipped
+point's own numbers, to the digit.
+
+### Refine on a 2n-1 grid, not an arbitrary one
+
+Growing the mesh exposed a property of this trajectory worth recording: **the flight torque
+profile oscillates at the knot scale**, swinging ~13 N.m between adjacent knots (u at flight
+knots 36/37: 11.8 then 24.7). The states are smooth and pass the integration check; the input
+is not smooth. So resampling the input onto a grid that does not contain the old breakpoints
+distorts it badly, and the distortion is worst at the start and end of flight where the tuck
+ramp moves the legs fastest.
+
+A bisected grid (`n_new == 2n-1`) contains every old knot, so the first-order hold through the
+resampled samples **is** the source's force, exactly. The difference is not subtle:
+
+| refinement | grid contains source knots | guess violation | flight integration drift |
+|---|---|---|---|
+| 50 -> 76 | no | 587 | 6.6e-1 |
+| 50 -> 99 | yes (bisection) | 18.0 | 7.0e-2 |
+
+Per-interval re-shooting (restarting the shot at each source knot instead of shooting across
+the phase) is in for correctness -- it pins every original knot to its solved state -- but it
+is worth noting it did *not* move the number on its own (17.4 -> 18.0). The residual at 99 is
+the torque-speed halfplanes (2.38 N.m over) and the collocation defects on alternating
+segments at each end of flight, i.e. it is all input-resampling error, not state error.
+
+Nullity at 50 knots is **16 / 5756 rows**, in line with the 15-16 recorded before, so none of
+this introduced an LICQ degeneracy.
+
 ## 2026-09-04 (later): 50 flight knots — 10/11, the best trajectory this project has produced
 
 Refining the flight mesh works. `out/backflip.npz` is now a **50-flight-knot** solve, violation

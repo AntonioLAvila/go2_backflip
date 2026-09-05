@@ -221,8 +221,13 @@ class Guess:
             out.append(dict(t=t, x=np.hstack([q, v]), u=u, lam=lam, gen=gen))
         return out
 
-    def _simulate(self, q0, v0, t, gen):
-        """Forward-integrate from (q0, v0) driven open-loop by gen(t), first-order-held."""
+    def _simulate(self, q0, v0, t, gen, t_out=None):
+        """Forward-integrate from (q0, v0) driven open-loop by gen(t), first-order-held.
+
+        `t_out` samples the result at times other than the hold's own breakpoints, which is
+        what mesh refinement needs: the force must stay the exact piecewise-linear function
+        the source solve was validated against, while the states come off a finer grid.
+        """
         builder = DiagramBuilder()
         plant = builder.AddSystem(make_plant())
         src = builder.AddSystem(TrajectorySource(PiecewisePolynomial.FirstOrderHold(t, gen.T)))
@@ -238,8 +243,9 @@ class Guess:
         plant.SetVelocities(ctx, v0)
         sim.Initialize()
 
+        ts_out = t if t_out is None else t_out
         q_out, v_out = [q0.copy()], [v0.copy()]
-        for tk in t[1:]:
+        for tk in ts_out[1:]:
             sim.AdvanceTo(tk)
             q_out.append(plant.GetPositions(ctx).copy())
             v_out.append(plant.GetVelocities(ctx).copy())
