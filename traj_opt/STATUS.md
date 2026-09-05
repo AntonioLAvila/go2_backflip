@@ -1,13 +1,22 @@
 # Backflip trajectory optimization — status
 
-Last updated 2026-09-04. Not yet converged
+Last updated 2026-09-05. Not yet converged
 (`is_success()==False`), and it may never need to be — see next steps. Best
-confirmed result: IPOPT, **10/11 audit checks passing, worst failure 1.61x
-over its threshold**, violation 0.1287, on the **50**-knot-flight problem with
-the 10 mm body-clearance margin, shipped as `out/backflip.npz` and reproducible
-from `out/checkpoints_backflip_k50/best_10of11.npy` with `--from-checkpoint`.
-The collocation-vs-integrator check, which had failed in every session this file
-records, now passes; only flight angular momentum is left.
+confirmed result, unchanged since 2026-09-04: IPOPT, **10/11 audit checks
+passing, worst failure 1.61x over its threshold**, violation 0.1287, on the
+**50**-knot-flight problem with the 10 mm body-clearance margin, shipped in
+`traj_opt/reference/` and reproducible from that directory's `backflip.npy`
+with `--from-checkpoint`. The collocation-vs-integrator check, which had failed
+in every session this file records, now passes; only flight angular momentum is
+left.
+
+**2026-09-05 refined that mesh to 99 flight knots and it did not help** — 9/11,
+and the angular-momentum drift moved 1.61e-3 → 1.53e-3 where 4th-order
+convergence predicted ~1.0e-4. The drift is dominated by the residual
+infeasibility, not by the mesh, so the lever is convergence and not resolution.
+That session also found that `warm_start.py` had never once round-tripped a
+solution; all three bugs are fixed and mesh refinement works now, which is what
+made the negative result measurable at all.
 
 **The headline number changed on 2026-09-04 from constraint violation to the
 audit**, and the shipped trajectory changed twice that day — first to the 26-knot
@@ -50,6 +59,90 @@ knees scrape the floor and its head touches down before its feet do.
 > including to the submodule's own fork remote — the "uncommitted working
 > tree, one accident from data loss" state flagged in the previous note is
 > resolved. See git log for the commit.
+## 2026-09-05 (later): 99 flight knots does NOT fix the angular momentum check
+
+With `warm_start.py` working, the refinement STATUS has been pointing at since 2026-08-23 was
+finally runnable: bisect flight 50 -> 99, warm start from the shipped trajectory, and run the
+audit-ranked restart search (24 bursts, 250 iterations each, ~13 min per burst, ~5 h).
+
+**It did not beat the shipped trajectory, and the reason is more useful than the result.**
+
+| | shipped (50 knots) | best of 24 bursts (99 knots) |
+|---|---|---|
+| audit | **10/11, worst 1.61x** | 9/11, worst 1.53x |
+| max_violation | 0.1287 | 0.1412 |
+| flight angular momentum drift | 1.61e-3 | **1.53e-3** |
+| friction cone worst slack | 6.15e-7 N (pass) | 1.52e-6 N (fail) |
+| floor penetration | +0.10 mm | +0.02 mm |
+| non-foot clearance | +9.94 mm | +12.75 mm |
+| torque envelope overshoot | 0.00 N.m | 0.00 N.m |
+
+`tools/ship.py` refuses it, correctly: 9/11 loses to 10/11 on the ranking key regardless of the
+better worst-overrun. The checkpoint is at
+`traj_opt/out/checkpoints_backflip_k99/best.npy` (gitignored scratch).
+
+### The finding: flight resolution is not what the angular-momentum check is measuring
+
+Angular momentum in flight is conserved exactly -- joint torques are internal forces -- so the
+audit's drift is pure transcription error, and it was the cleanest possible candidate for mesh
+refinement. Hermite-Simpson is globally 4th order, so bisecting the flight mesh should have cut
+that drift by about 16x, from 1.61e-3 to ~1.0e-4, comfortably inside the 1e-3 bound.
+
+**It moved 5%.** 1.61e-3 -> 1.53e-3.
+
+What the two points do have in common is their residual infeasibility, and the drift tracks
+that instead:
+
+| | max_violation | L drift | ratio |
+|---|---|---|---|
+| 50 knots | 0.1287 | 1.61e-3 | 1.25e-2 |
+| 99 knots | 0.1412 | 1.53e-3 | 1.08e-2 |
+
+Two points is not a law, but it is the only explanation consistent with both numbers: at
+violation ~0.14 the trajectory is nowhere near converged enough for **mesh resolution to be the
+binding term**. The discretization error a finer mesh removes is an order of magnitude below
+the infeasibility already present. Refining a mesh to fix an error that the residual dominates
+buys a 5% change and a 1.5x larger, slower program.
+
+**This overturns the plan recorded in the previous section**, which listed "more flight knots"
+as the cheapest next step and "the only lever with direct evidence behind it". The direct
+evidence was 26 -> 50 improving the integration check, and that is real, but it does not
+generalize: 50 -> 99 improves the integration check again (flight drift 3.2e-3 -> 4.3e-3 q is
+flat, and the check passes at both) while leaving the failing check where it was. **The lever
+is convergence, not resolution.**
+
+### The search peaked early and then degraded for 16 straight bursts
+
+| burst | viol | audit |
+|---|---|---|
+| start | 10.77 | 7/11, worst 2.4e6x |
+| 0 | 5.17 | 8/11, 14.21x |
+| 2 | 0.204 | 9/11, 10.88x |
+| 3 | 0.394 | 9/11, 2.18x |
+| **7** | **0.141** | **9/11, 1.53x** |
+| 8-23 | 0.39 - 21.6 | 6/11 - 9/11, never better |
+
+The chain-forward restart loop behaved exactly as its docstring says it does -- it wanders --
+but on this seed it found its best point at burst 7 and never recovered, sixteen bursts in a
+row. Same shape as the 2026-09-04 m1 run, where the best came at burst 1 and 17 further bursts
+produced nothing. **Two independent runs now say the restart search's useful yield is in its
+first handful of bursts.** Budgeting 24 is buying very little past ~8.
+
+### A calibration problem in the friction-cone check, flagged not fixed
+
+The 99-knot point fails `contact forces inside the friction cone` at a worst slack of
+**1.52e-6 N** against a bound of `1e-6`. That is 1.5 microNewtons on a robot whose contact
+forces run ~200 N -- 5e-9 relative. It is a solver-residual threshold, not a physics one, and
+unlike the other checks it is an absolute bound that does not scale with the force it
+constrains. The shipped point passes it at 6.15e-7, in the same numerical-noise band. On this
+check the two trajectories are not really being distinguished.
+
+Deliberately NOT changed. Relaxing it would flip this session's own result from 9/11 to 10/11
+at a better worst-overrun than the shipped point, which is exactly the circumstance in which
+a threshold should not be touched. If it is recalibrated it should be on its own merits --
+scaled to `lambda_z`, or to the solve's feasibility tolerance -- and by someone not holding a
+trajectory that benefits.
+
 ## 2026-09-05: warm_start.py never worked, and it was three re-timing bugs
 
 `warm_start.py` has been in the repo since 2026-08-23 with a docstring promising that a phase
