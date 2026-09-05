@@ -36,6 +36,16 @@ constants import needed to become a package.
 
 ## Commands
 
+**`traj_opt/reference/`** is the shipped trajectory, tracked in git: `backflip.npz` (500 Hz,
+MuJoCo convention), `backflip.npy` (the decision-variable vector that reproduces it), and
+`manifest.json` (audit result, mesh, commit, every check's margin). `traj_opt/out/` is scratch
+and gitignored, and a solve is not bit-reproducible across machines — IPOPT's linear algebra is
+threaded and hardware-dependent — so the best trajectory lives in the repo as an *artifact*, not
+as a recipe. Promote a new one with `uv run tools/ship.py <checkpoint>`, which re-audits it and
+**refuses to ship anything that audits worse** than what is already there (same
+`(checks failed, worst overrun)` key `restart_loop` ranks by). Downstream stages read
+`traj_opt/reference/backflip.npz`; `traj_opt/out/backflip.npz` is a working file.
+
 ```bash
 # Prove Drake and MuJoCo agree on go2.xml (structure, mass, mass matrix, inverse dynamics,
 # open-loop torque tape). Checks A-E must pass; F is report-only (contact is expected to differ).
@@ -65,6 +75,10 @@ uv run traj_opt/mj_divergence.py
 # sanity-check the linear torque-speed envelope against the true (non-smooth) one:
 uv run tools/tuck_box.py
 uv run tools/check_envelope.py
+
+# Promote a solved checkpoint to the tracked reference trajectory (re-audits, refuses a
+# regression unless --force):
+uv run tools/ship.py traj_opt/out/checkpoints_<run>/best.npy --note "why"
 ```
 
 No test suite exists; `verify_parity.py`, `check_envelope.py`, and the audit in

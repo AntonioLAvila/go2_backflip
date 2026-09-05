@@ -1,0 +1,26 @@
+{
+  "source_checkpoint": "traj_opt/out/checkpoints_backflip_k50/best_10of11.npy",
+  "commit": "6dfce06be02197f7cac85f5e28b8a3a079bb3dae",
+  "flight_knots": 50,
+  "max_violation": 0.128651,
+  "checks_passed": 10,
+  "checks_failed": 1,
+  "worst_overrun": 1.6089,
+  "failed": [
+    "flight angular momentum conserved"
+  ],
+  "margins": {
+    "quaternion stays unit without being pinned": 0.248,
+    "net rotation is one full backflip": 0.0109,
+    "flight CoM is ballistic": 0.0143,
+    "flight angular momentum conserved": 1.6089,
+    "contact forces inside the friction cone": 0.615,
+    "torques inside the enforced torque-speed halfplanes": 0.0,
+    "no geometry below the floor": 0.0498,
+    "non-foot geometry keeps its clearance margin": 0.5533,
+    "sagittal symmetry holds without being pinned": 0.2796,
+    "flight is genuinely tucked": 0.9256,
+    "collocation matches a tight integrator": 0.6885
+  },
+  "note": "50-knot flight mesh; first point to pass the collocation-vs-integrator check"
+}

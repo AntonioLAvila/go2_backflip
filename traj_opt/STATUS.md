@@ -112,6 +112,23 @@ Do not quote an order from this table.
 against 13 at 26 — the same `_add_boundary` / `_add_stitching` families, no new degeneracy class,
 and IPOPT never raised `TOO_FEW_DOF`.
 
+### The trajectory is now tracked in the repo
+
+`traj_opt/out/` is scratch and gitignored, which was fine while the numbers were the deliverable
+and wrong now that a trajectory is. A solve is not bit-reproducible across machines anyway —
+IPOPT's linear algebra is threaded and hardware-dependent — so the best result has to live in the
+repo as an artifact rather than as a recipe.
+
+`traj_opt/reference/` holds `backflip.npz` (500 Hz, MuJoCo convention), `backflip.npy` (the
+decision-variable vector that reproduces it) and `manifest.json` (mesh, commit, violation, and
+every check's margin). Together ~330 KB. Promote with `uv run tools/ship.py <checkpoint>`, which
+re-audits the point and **refuses a regression** on the same `(checks failed, worst overrun)` key
+`restart_loop` ranks by — verified: a perturbed vector auditing 2/11 is rejected and the shipped
+files are left untouched. `--force` plus a `--note` overrides, and the note goes in the manifest.
+
+Downstream stages should read `traj_opt/reference/backflip.npz`. `traj_opt/out/backflip.npz`
+stays a working file that any solve overwrites.
+
 ### What is left
 
 One check. Flight angular momentum, 1.61e-3 against a 1e-3 bound. In flight there is no contact
