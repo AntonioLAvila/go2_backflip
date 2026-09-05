@@ -45,7 +45,8 @@ from schedule import PHASES
 from solve_backflip import result_from_vector
 
 
-def export(bp: BackflipProgram, result, out_path: str, new_n_knots: dict[int, int]) -> None:
+def export(bp: BackflipProgram, result, out_path: str, new_n_knots: dict[int, int],
+           states: str = "shoot") -> None:
     g_helper = Guess(bp.plant)  # for _gen_force and _simulate
     nq = bp.plant.num_positions()
     data = {}
@@ -76,14 +77,26 @@ def export(bp: BackflipProgram, result, out_path: str, new_n_knots: dict[int, in
             lam_new = (_foh(ts, lam_old.reshape(ph.n_knots, -1), t_new).reshape(n_new, nc, 3)
                        if nc else np.zeros((n_new, 0, 3)))
             # States come from FORWARD-INTEGRATING the true dynamics through the same
-            # first-order-held generalized force the transcription itself applies -- not from
-            # sampling DirectCollocation's reconstruction spline, which is what this used to do.
-            # The knots of a solved phase are a genuine trajectory (audit's integration check
-            # confirms it), but the cubic through them is only an interpolant: sampling it
-            # between knots broke sagittal symmetry from 2.8e-4 to 3.1e-2 rad and left the
-            # refined guess at violation 588. Re-simulating is exactly the single-shooting step
-            # guess.py already uses for launch/flight, and for the same reason.
-            x_new = _shoot(ts, gen_old, x_old, t_new, nq)
+            # first-order-held generalized force the transcription applies. `--states spline`
+            # samples the source's own Hermite reconstruction instead.
+            #
+            # The spline is the more obvious choice and it is measurably worse. The argument
+            # for it: Hermite-Simpson enforces the dynamics at each interval's MIDPOINT, and a
+            # bisected grid puts a new knot exactly there, on a point the source already
+            # satisfies with a known state and input. That argument does not survive contact
+            # with the numbers -- the source satisfies those equations only to its own residual
+            # (up to 0.13), and the refined half-interval defect is a different equation, not
+            # the one that was satisfied. Median flight defect of the 50 -> 99 guess:
+            #
+            #     shoot   1.4e-2   max 10.77      spline   1.1e-1   max 13.06
+            #
+            # against the source's own median of 7e-3. So refinement still costs something at
+            # both ends of flight either way; shooting costs an order of magnitude less.
+            if states == "spline":
+                traj = bp.dc[p].ReconstructStateTrajectory(result)
+                x_new = np.array([traj.value(tk).ravel() for tk in t_new])
+            else:
+                x_new = _shoot(ts, gen_old, x_old, t_new, nq)
             # Recompute the port force from the resampled knots so the guess satisfies the
             # port constraint (gen == B@u + sum J^T lambda) exactly. Contact-free phases make
             # this identical to gen_ref, since there gen is just B@u and B is constant.
@@ -178,6 +191,10 @@ def main() -> int:
     ap.add_argument("--load-knots", type=int, default=None)
     ap.add_argument("--launch-knots", type=int, default=None)
     ap.add_argument("--absorb-knots", type=int, default=None)
+    ap.add_argument("--states", choices=["shoot", "spline"], default="shoot",
+                     help="where a GROWN phase's states come from: the source's own Hermite "
+                          "spline (default, and what the transcription itself satisfies) or a "
+                          "forward integration of the true dynamics")
     args = ap.parse_args()
 
     bp = BackflipProgram()
@@ -193,7 +210,7 @@ def main() -> int:
                       ("flight", args.flight_knots), ("absorb", args.absorb_knots)):
         if val is not None:
             new_n_knots[[p.name for p in PHASES].index(name)] = val
-    export(bp, result, args.out, new_n_knots)
+    export(bp, result, args.out, new_n_knots, args.states)
     return 0
 
 

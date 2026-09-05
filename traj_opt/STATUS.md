@@ -149,6 +149,29 @@ checkable at all.
 Knot-to-knot consistency of the 99-knot guess across flight, integrating each knot forward to
 the next through the guess's own force: **median 5.4e-5**, max 4.3e-2 at that final segment.
 
+### Where a refined phase's states should come from: shooting, not the spline
+
+Measured both ways on the bisected 50 -> 99 grid, defect per flight segment:
+
+| states from | median | max | vs source (median 7e-3, max 0.129) |
+|---|---|---|---|
+| forward integration (`--states shoot`, default) | 1.4e-2 | 10.77 | 2x worse median |
+| the source's Hermite spline (`--states spline`) | 1.1e-1 | 13.06 | 16x worse median |
+
+The spline is the more obvious choice and it loses. The argument for it is good and wrong:
+Hermite-Simpson enforces the dynamics at each interval's MIDPOINT, and bisecting puts a new
+knot exactly there -- on a point the source already satisfies, with the state (the Hermite
+interpolant) and input (the endpoint average, which is what the first-order hold gives) it
+satisfied them with. What that argument misses is that the source satisfies those equations
+only to its own residual, up to 0.13, and that the refined half-interval defect is a different
+equation from the one that was satisfied.
+
+**Refinement is not free on this problem in either form.** Both make the median flight defect
+worse than the source's, and both leave large outliers (10.77 and 13.06) at the same place:
+segments 0/1/3 and 76/77/96/97, the two ends of the flight phase, where the legs fold in and
+extend out fastest and the source's own solution is least accurate. The bulk of the mesh is
+fine -- 92 of 98 segments are at or below 1e-2.
+
 ## 2026-09-04 (later): 50 flight knots — 10/11, the best trajectory this project has produced
 
 Refining the flight mesh works. `out/backflip.npz` is now a **50-flight-knot** solve, violation
