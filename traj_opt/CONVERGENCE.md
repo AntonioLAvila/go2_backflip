@@ -849,3 +849,40 @@ them changed a constraint that was doing work.
 | K9 | The friction cone is exactly dependent at release knots | pin `lambda_x = 0` there | scaled nullity 10 -> 2 | `WIN` |
 | K10 | The last two are boundary/clearance duplicates | `_position_implied` on body clearance | scaled nullity 2 -> **0**, cond -> 1.41e9 | `WIN` |
 | K11 | A full-rank, well-conditioned KKT system converges | runs `g1`-`g5` | — | `RUN` |
+
+## M21 — full rank is necessary but not sufficient: the solve still does not converge
+
+With the scaled KKT Jacobian at nullity 0 and cond 1.41e9, five arms (warm and cold start,
+proximal and plain, adaptive and monotone barrier) reach:
+
+    g1/g2  685 iters   min inf_pr 0.577   min inf_du 15.9
+    g3     1756 iters  min inf_pr 0.759   min inf_du 13.6
+    g4     341 iters   min inf_pr 0.577   min inf_du **3.12**
+    g5     208 iters   min inf_pr 0.473   min inf_du 16.1
+
+3.12 is the best dual infeasibility this campaign has produced, against a `tol` of 1e-4. So
+fixing the Jacobian's rank and conditioning **moved the number by a factor of ~2 and no more**.
+That is a real negative result and it rules out the explanation the whole of M14-M20 was built
+on: at the shipped point, the constraint Jacobian is no longer what blocks stationarity.
+
+| # | hypothesis | change | measured | verdict |
+|---|---|---|---|---|
+| K11 | A full-rank, well-conditioned Jacobian converges | K6+K7+K9+K10 | min inf_du 5.42 -> 3.12; no success | `LOSS` |
+| K12 | `bound_push=1e-8` makes the barrier Hessian singular (slacks 1e-8 on ~282 bound-active variables give entries of order 1e16) | `bound_push` 1e-2 / 1e-4 | **worse on both residuals**: min inf_pr 0.576-37.7 against 0.577, min inf_du 19-49 against 3.12 | `LOSS` — the 2026-09-03 setting stands for a second reason |
+
+## What is left
+
+The Jacobian is full rank and well conditioned; the barrier setting is confirmed optimal; the
+objective has been varied over six forms and four weights; the barrier strategy over three.
+Dual infeasibility does not go below ~3.
+
+The remaining candidates, in the order they are worth testing:
+
+1. **The Hessian approximation.** Drake supplies no second derivatives, so IPOPT runs
+   `limited-memory` L-BFGS with a default history of **6** on a 6408-variable problem. Part I
+   screened `limited_memory_max_history=50` and recorded it as `DEAD` — but that screen ran
+   *while restoration owned every burst*, where nothing about the quasi-Newton model could
+   matter. That verdict does not carry to this regime, and the re-test is `i1`-`i4`.
+2. **The active set changes during the solve.** `kkt_check` measures one point. Nothing yet
+   measures whether the conditioning holds along the path.
+3. **These iterates are not near a stationary point** of any objective posed so far.
