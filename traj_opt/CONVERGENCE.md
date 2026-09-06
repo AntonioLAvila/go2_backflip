@@ -746,3 +746,40 @@ also where a boundary condition and a per-knot family describe the same quantity
 | K6 | Symmetry belongs in the objective, not the active set | `--sym-penalty 10 --sym-box 1e-2` | active rows drop, nullity falls | **180 -> 100 active, nullity 188 -> 121**, symmetry gone from the null space | `WIN` (structurally) |
 | K7 | The momentum constraint is redundant against the defects it is built on | `--amom-penalty` | large nullity drop | **nullity 121 -> 35, active 100 -> 14** | `WIN` (structurally) |
 | K8 | With nullity 35 the solve converges | runs `e1`-`e4` | `is_success()` | — | `RUN` |
+
+## M18 — dual infeasibility bottoms out at ~10-30 in *every* configuration
+
+Across sixteen arms spanning cold and warm starts, costed and feasibility-only objectives,
+proximal and symmetry and momentum penalties at four weights, monotone and adaptive barriers,
+and three scalings, the minimum dual infeasibility reached is:
+
+    a3 (costed, TIGHT)                  7.77
+    b2/b3 (sym penalty, loose box)      5.42
+    c1/c3 (monotone barrier)           10.6 - 11.9
+    d1/d2/d4 (proximal + sym penalty)   5.42
+    e1-e4 (momentum penalty too)       29.2 - 57.2
+    f1/f2 (cold start, fully penalised) 27.6
+    f3 (minimal objective)             12.1
+
+Nothing reaches even 1, against a `tol` of 1e-4. And it is flat across formulations that
+differ by 157 rows of rank deficiency, which says the remaining obstacle is **not** the rank
+deficiency the last two findings removed.
+
+`inf_pr` behaves quite differently and much better — the cold start drives it 2.06e+02 ->
+3.62e-01 — so the solver is working; it is the stationarity residual specifically that will
+not move.
+
+Two candidate explanations, and they are distinguishable:
+
+1. **Conditioning rather than rank.** `kkt_check` reported cond 3.0e20 on the *raw* Jacobian,
+   which is past double precision, so computed multipliers would be numerical noise regardless
+   of rank. But that number overstates what IPOPT faces: `nlp_scaling_max_gradient` rescales
+   every constraint row, so the honest measurement is the row-normalised condition number.
+   `kkt_check` now reports both.
+2. **These iterates are simply not near a stationary point** of the objectives being posed,
+   and the audit-passing region is not where any local minimum sits.
+
+Also worth recording, because it invalidated a comparison: `--feasibility-only` and the
+default costed run are **identical** once `--sym-penalty` or `--amom-penalty` is on, because
+those penalties are added in the constructor and `--feasibility-only` only skips `add_cost`.
+Arms f1/f2 and a1/a2 were reading as independent samples and were not.

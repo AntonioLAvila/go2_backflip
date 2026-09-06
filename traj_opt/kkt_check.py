@@ -147,6 +147,19 @@ def main() -> int:
           f"sigma max {s.max():.3e} min {s.min():.3e}; cond {cond:.2e}")
     print(f"NULLITY = {nullity}")
 
+    # ...and again with every row normalised to unit inf-norm. IPOPT does not see the raw
+    # Jacobian: nlp_scaling_max_gradient rescales each constraint so its largest gradient
+    # element is at most that value, which is exactly a row scaling. Quoting the unscaled
+    # condition number overstates what the linear solver faces, and on this problem the two
+    # differ by orders of magnitude -- the raw sigma_max is set by whichever defect row has
+    # the biggest accelerations, not by any coupling.
+    R = M / np.maximum(np.abs(M).max(axis=1, keepdims=True), 1e-300)
+    sr = np.linalg.svd(R, compute_uv=False)
+    tr = sr.max() * max(R.shape) * np.finfo(float).eps * 100
+    print(f"row-normalised (what IPOPT's scaling gives it): "
+          f"sigma max {sr.max():.3e} min {sr.min():.3e}; "
+          f"cond {sr.max() / sr[sr > 0].min():.2e}; nullity {int((sr < tr).sum())}")
+
     if nullity:
         U, s2, _ = np.linalg.svd(M, full_matrices=False)
         energy = (U[:, np.argsort(s2)[:nullity]] ** 2).sum(axis=1)
