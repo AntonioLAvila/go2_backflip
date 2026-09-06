@@ -1,12 +1,42 @@
 # Backflip trajectory optimization — status
 
-Last updated 2026-09-05. Not yet converged
-(`is_success()==False`), and it may never need to be — see next steps. Best
-confirmed result: IPOPT, **9/11 audit checks passing, worst failure 1.97x over
-its threshold**, violation 0.1375, on the **50**-knot-flight problem with the
-10 mm body-clearance margin and the **2% actuator safety factor**, shipped in
-`traj_opt/reference/` and reproducible from that directory's `backflip.npy`
-with `--from-checkpoint`.
+Last updated 2026-09-06. **All eleven audit checks now pass.** Still not
+`is_success()` — violation 0.9043 — and on this problem that remains the wrong
+number to read; see 2026-09-04 and the campaign log.
+
+The 11/11 point is `n9` burst 1 on the **50**-knot-flight problem, kept at
+`traj_opt/out/cand/n9_11of11.npy`. Two changes got it there, and they fix
+different checks:
+
+* **`nlp_scaling_max_gradient=1`** (now an `ipopt_options` default). IPOPT's
+  default constraint scaling was putting every restart burst into its
+  RESTORATION phase on the second iteration, where it stayed for the rest of the
+  burst while `inf_pr` GREW — 0.138 to 18 over 206 iterations. The restart
+  loop's documented "peaks early then degrades for 16 straight bursts" was that.
+  Fixing it takes collocation-vs-integrator from 6.30e-3 to 4.09e-3.
+* **`--flight-amom`** (new, on by default at `AMOM_BOX = 1e-6`). In flight the
+  only external force is gravity, acting at the CoM, so angular momentum about
+  the CoM is exactly conserved by the true dynamics — and nothing in the
+  formulation said so. Takes the momentum check from 1.97e-3 to 9.20e-4.
+
+**`traj_opt/CONVERGENCE.md` is the campaign log** for that work: every
+hypothesis, what was predicted, what was measured, and what is therefore ruled
+out. Read it before re-trying anything on convergence. Sixteen options were
+screened; only the scaling ones mattered.
+
+**A new tool, `tools/check_tape.py`**, asks the same physics on the resampled
+500 Hz tape instead of at the knots, closing the TODO this file has carried
+since 2026-09-05. It matters: the 11/11 point passes all eleven audit checks
+and still rings +10.58 N.m over the design envelope on 6.73% of tape samples
+(the shipped one: +2.33 on 2.60%). Hardware clearance is preserved either way
+(0.502 N.m vs 0.481). The overshoot is entirely the speed-dependent halfplane,
+whose `qd` comes from the cubic state spline — so it is joint velocity ringing
+between knots, not torque, and input-rate weighting cannot touch it.
+
+The previously shipped result, for comparison: IPOPT, **9/11 audit checks
+passing, worst failure 1.97x over its threshold**, violation 0.1375, on the
+same 50-knot problem with the 10 mm body-clearance margin and the 2% actuator
+safety factor.
 
 **The actuator limits the optimization enforces changed on 2026-09-05** to
 hip/thigh **23.226** and calf **44.100** N.m — 98% of the datasheet peaks, with

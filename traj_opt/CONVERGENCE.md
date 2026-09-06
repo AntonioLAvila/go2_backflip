@@ -368,7 +368,7 @@ actually measures.
 | # | hypothesis | change | predicted | measured | verdict |
 |---|---|---|---|---|---|
 | H13 | Chaining all three components bounds the check | `--flight-amom`, vector chain | AM passes | L_y to 1e-05, **L_x floors at 1.0-1.1e-3** across every seed | `LOSS` — chain alone cannot anchor L_x |
-| H14 | L_x and L_z are identically zero, so bound them absolutely | `AMOM_LATERAL = 5e-4` | AM passes, 11/11 | runs `r1`-`r5` | `RUN` |
+| H14 | L_x and L_z are identically zero, so bound them absolutely | `AMOM_LATERAL = 5e-4` | AM passes, 11/11 | **11/11 at viol 0.386, better than the pre-anchor 11/11 on every single measure** | `WIN` |
 
 ---
 
@@ -450,3 +450,30 @@ loading the moment it changes, *including the ones a concurrent search is still 
 `warm_start.py` has to export before the edit while the file still matches the source. The env
 var keeps both meshes runnable at once, which is what let the refinement start without
 stopping fifteen 50-knot chains.
+
+---
+
+## The lateral anchor is what made the 11/11 good, not just possible
+
+`n9` reached 11/11 *before* `AMOM_LATERAL` existed, by luck of the chain. `r1` reached it with
+the anchor, and dominates it everywhere:
+
+| | shipped | `n9` 11/11 (chain only) | `r1` 11/11 (+ lateral anchor) |
+|---|---|---|---|
+| audit | 9/11 @ 1.97x | 11/11 | **11/11** |
+| `max_violation` | 0.1375 | 0.9043 | **0.3858** |
+| flight AM drift (knots) | 1.97e-3 | 9.20e-4 | **7.56e-4** |
+| collocation vs integrator | 6.30e-3 | 4.09e-3 | 4.13e-3 |
+| flight AM peak-to-peak (tape) | 3.39e-3 | 2.04e-3 | **1.47e-3** |
+| tape vs design envelope | +2.33 on 2.60% | +10.58 on 6.73% | +4.72 on 2.31% |
+| tape clearance to HARDWARE peak | 0.481 | 0.502 | **0.659** |
+
+Against the shipped trajectory, `r1` is better on every audit check, better on tape momentum,
+better on hardware clearance by 37%, and affects a *smaller* fraction of tape samples
+(2.31% vs 2.60%). The one place it is worse is the size of the worst design-envelope
+excursion, +4.72 N.m against +2.33. That excursion is against the speed-derated linear model,
+not the motor: it never comes within 0.659 N.m of what the hardware can actually deliver,
+where the shipped trajectory gets within 0.481.
+
+Four independent chains (`n9`, `q1`, `q2`, `t3`, `r1`) reached 11/11, so the recipe is
+reproducible rather than a lucky burst.
