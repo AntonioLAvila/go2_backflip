@@ -548,3 +548,36 @@ each other — and they span **16x** on the tape. Picking by audit score alone h
 of shipping something that rings five to thirteen times worse than what it replaced. That is
 the `max_violation` lesson one level further out: the selection criterion has to be measured
 where the artifact is consumed.
+
+## Reproducibility
+
+The recipe is not a lucky burst. **Six independent chains reached 11/11** — `n9`, `q1`, `q2`,
+`t3`, `t6`, `r1` — from three different seeds. Most directly, a run with **nothing but the
+defaults**, seeded on the old 9/11 reference:
+
+    uv run traj_opt/solve_backflip.py \
+        --start-checkpoint traj_opt/reference/backflip.npy --no-prepass \
+        --restarts 30 --burst-iters 250
+
+reached 11/11 on its **second burst** (`repro_b1`, tape +2.41 N.m on 1.74%). The defaults are
+`nlp_scaling_max_gradient=1` and `--flight-amom 1e-6`.
+
+## Final state
+
+Shipped: `t3_b0` — 11/11, worst margin 0.98x, `max_violation` 0.5797, 675 samples over 1.348 s.
+
+Still failing on the tape, and this is the honest remaining gap:
+
+    [FAIL] torque inside the enforced design envelope   +0.7868 N.m on 0.44% of samples
+    [FAIL] torque inside the HARDWARE torque-speed env  +0.5076 N.m
+    [FAIL] flight angular momentum conserved            peak-to-peak 1.34e-03, bound 1e-03
+
+All three are better than the trajectory it replaced (+2.33 / +1.85 / 3.39e-3), and all three
+are between-knot artefacts of Hermite-Simpson rather than anything the solve did wrong. The
+next piece of work, with the diagnosis already done:
+
+1. **Enforce the torque-speed envelope at the Hermite midpoints**, not only at knots. That is
+   where the tape overshoots, and it is the only remaining route — `--w-rate` cannot touch it
+   (M11) and mesh refinement cannot be started from a ringing source (M12). Cost is one
+   dynamics evaluation per interval to form the midpoint state.
+2. **Same for the momentum box.** It is enforced at knots and rings to 1.34e-3 between them.
