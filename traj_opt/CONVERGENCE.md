@@ -690,3 +690,59 @@ pin holds at two consecutive knots. Making them boxes rather than equalities (th
 fix) kept them out of the *equality* rank requirement and did nothing about this, because an
 active inequality is back in the KKT system either way.
 
+
+## M17 — the momentum constraint from Part I is itself half the rank deficiency
+
+`kkt_check` at the shipped point, loose symmetry box, top of the null-space listing:
+
+    6.90  (19 rows)  _add_boundary:691 (eq)
+    ...
+    1.00  ( 1 rows)  amom_39_40[1] (act)
+    1.00  ( 1 rows)  amom_38_39[1] (act)
+    1.00  ( 1 rows)  amom_40_41[1] (act)      <- and so on, dozens of them
+
+**Energy 1.00 on a single row means that row lies entirely in the null space** — it is exactly
+redundant. Every chained momentum row scores that.
+
+The reason is the thing that made the constraint attractive in the first place. Angular
+momentum about the CoM is conserved *as an exact consequence of the dynamics*, and the
+collocation defects already encode the dynamics — so along the defect manifold the Jacobian of
+`L(k+1) - L(k)` is a linear combination of defect rows. Asserting a true invariant that the
+formulation already contains is precisely the LICQ failure mode CLAUDE.md names as "the
+recurring bug class in this NLP", and Part I walked straight into it.
+
+Measured, removing them:
+
+| formulation | active inequalities | nullity | cond |
+|---|---|---|---|
+| original (TIGHT boxes, hard momentum) | 180 | **192** | 3.2e21 |
+| + `_position_implied` redundancy removal | 180 | 188 | 4.1e21 |
+| + loose symmetry box (`--sym-box 1e-2`) | 100 | 121 | 3.0e20 |
+| + momentum as a penalty (`--amom-penalty`) | **14** | **35** | 3.0e20 |
+
+**Nullity 192 -> 35, and the active set from 180 rows to 14.** Both wins come from the same
+principle: a constraint that states something the formulation already implies costs rank and
+buys nothing. Symmetry boxes the solve rides, and a conservation law the dynamics already
+enforce, were both of that kind.
+
+`--amom-penalty W` (with `--flight-amom 0`) imposes the invariant as a cost instead. It pulls L
+the same way and never enters the active set. Whether the audit's momentum check survives the
+softer form is the thing to measure next — Part I's whole 11/11 depends on it.
+
+## The remaining 35
+
+    6.75  (19 rows)  _add_boundary:711 (eq)   <- eq(x0[XQ], q0), the initial configuration
+    4.76  (12 rows)  _add_boundary:719 (eq)   <- eq(xf[XQ][7:], HOME_LEGS)
+    3.22  (74 rows)  _add_stitching:673 (eq)  <- phase state continuity
+    2.50  ( 4 rows)  _add_contact:433 (act)
+    2.50  ( 4 rows)  _add_contact:434 (act)
+    2.06  ( 4 rows)  _add_boundary:718 (eq)   <- eq(xf[XQ][:4], [-1,0,0,0])
+
+These are equalities, not boxes the solve rides, so they cannot be loosened away. They are
+also where a boundary condition and a per-knot family describe the same quantity.
+
+| # | hypothesis | change | predicted | measured | verdict |
+|---|---|---|---|---|---|
+| K6 | Symmetry belongs in the objective, not the active set | `--sym-penalty 10 --sym-box 1e-2` | active rows drop, nullity falls | **180 -> 100 active, nullity 188 -> 121**, symmetry gone from the null space | `WIN` (structurally) |
+| K7 | The momentum constraint is redundant against the defects it is built on | `--amom-penalty` | large nullity drop | **nullity 121 -> 35, active 100 -> 14** | `WIN` (structurally) |
+| K8 | With nullity 35 the solve converges | runs `e1`-`e4` | `is_success()` | — | `RUN` |

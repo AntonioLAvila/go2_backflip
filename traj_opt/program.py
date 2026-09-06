@@ -289,7 +289,8 @@ class _Momentum:
 
 class BackflipProgram:
     def __init__(self, amom: float | None = None, amom_mode: str = "chain",
-                 sym_penalty: float = 0.0, sym_box: float | None = None):
+                 sym_penalty: float = 0.0, sym_box: float | None = None,
+                 amom_penalty: float = 0.0):
         self.sym_penalty = sym_penalty
         self.sym_box = MIRROR if sym_box is None else sym_box
         self.plant = make_plant()
@@ -338,8 +339,8 @@ class BackflipProgram:
         self._add_body_clearance()
         self._add_stitching()
         self._add_boundary()
-        if amom is not None:
-            self._add_flight_momentum(amom, amom_mode)
+        if amom is not None or amom_penalty:
+            self._add_flight_momentum(amom or 0.0, amom_mode, penalty=amom_penalty)
         self._scale()
 
     # --- helpers ---------------------------------------------------------
@@ -451,6 +452,23 @@ class BackflipProgram:
         if p == len(PHASES) - 1:
             implied.add(ph.n_knots - 1)                 # xf pins all of v to zero
         return implied
+
+    @staticmethod
+    def _position_implied(p, ph):
+        """Knots where a POSITION-ONLY per-knot constraint is already imposed by something else.
+
+        Every family that depends on q alone -- symmetry pins, floor and body clearance, the
+        quaternion-norm box, the flight tuck box -- is an exact duplicate at these knots, and a
+        duplicate is not free: the moment the solve rides it, it is an ACTIVE inequality
+        rank-deficient against whatever already implied it. This is the same reasoning, and the
+        same shape, as _noslip_implied.
+
+        Velocity- or input-dependent families must NOT use this. `self.u[p]` is a separate
+        variable per phase and _add_stitching does not equate inputs, so actuator limits at a
+        stitched knot are genuinely new rows; and the impact stitch equates XQ only, so nothing
+        velocity-level is implied across it either.
+        """
+        return BackflipProgram._symmetry_implied(p, ph)
 
     @staticmethod
     def _symmetry_implied(p, ph):
@@ -605,7 +623,10 @@ class BackflipProgram:
             swing = [f for f in K.FEET if f not in ph.contacts]
             if not swing:
                 continue
+            implied = self._position_implied(p, ph)
             for k in range(ph.n_knots):
+                if k in implied:
+                    continue          # duplicate of the previous phase's final knot
                 # A boundary knot shares its q with the neighbouring stance phase, where the
                 # foot is on the ground, so only interior knots can demand real clearance.
                 lb = 0.0 if k in (0, ph.n_knots - 1) else FOOT_CLEARANCE
@@ -702,14 +723,17 @@ class BackflipProgram:
 
         # Unit norm at every knot. quat_x = quat_z = 0 already, so this is a 2-term circle.
         for p, ph in enumerate(PHASES):
+            implied = self._position_implied(p, ph)
             for k in range(ph.n_knots):
+                if k in implied:
+                    continue
                 q = self.state(p, k)[XQ]
                 norm = q[0] ** 2 + q[2] ** 2
                 self.prog.AddConstraint(1.0 - QUAT_BOX <= norm)
                 self.prog.AddConstraint(norm <= 1.0 + QUAT_BOX)
 
     def _add_flight_momentum(self, box: float, mode: str = "chain",
-                             lateral: float = AMOM_LATERAL):
+                             lateral: float = AMOM_LATERAL, penalty: float = 0.0):
         """Bound the flight phase's angular-momentum drift. See AMOM_BOX.
 
         Two forms, and the difference is the Jacobian's sparsity, not the physics:
@@ -737,8 +761,15 @@ class BackflipProgram:
             def lat(z, mom=mom):
                 return mom.l(z[XQ], z[XV])[[0, 2]]
 
-            self.prog.AddConstraint(lat, [-lateral] * 2, [lateral] * 2,
-                                    self.state(FLIGHT, k), description=f"amom_lat_{k}")
+            if penalty:
+                def lat_cost(z, mom=mom, w=penalty):
+                    e = mom.l(z[XQ], z[XV])
+                    return w * (e[0] ** 2 + e[2] ** 2)
+
+                self.prog.AddCost(lat_cost, self.state(FLIGHT, k))
+            else:
+                self.prog.AddConstraint(lat, [-lateral] * 2, [lateral] * 2,
+                                        self.state(FLIGHT, k), description=f"amom_lat_{k}")
 
         pairs = ([(0, k) for k in range(1, ph.n_knots)] if mode == "anchor"
                  else [(k, k + 1) for k in range(ph.n_knots - 1)])
@@ -749,10 +780,25 @@ class BackflipProgram:
                 x, y = z[:NX], z[NX:]
                 return mom.l(y[XQ], y[XV]) - mom.l(x[XQ], x[XV])
 
-            self.prog.AddConstraint(
-                d, -box * np.ones(3), box * np.ones(3),
-                np.concatenate([self.state(FLIGHT, a), self.state(FLIGHT, b)]),
-                description=f"amom_{a}_{b}")
+            zab = np.concatenate([self.state(FLIGHT, a), self.state(FLIGHT, b)])
+            if penalty:
+                # As a COST, not a constraint. Angular-momentum conservation is an exact
+                # consequence of the dynamics, so along the collocation manifold the Jacobian
+                # of this difference is a linear combination of the defect rows that already
+                # imply it. kkt_check measures every one of these at null-space energy 1.00 --
+                # entirely redundant -- which is the LICQ failure mode CLAUDE.md warns about,
+                # here caused by asserting a TRUE invariant the formulation already contains.
+                # A penalty pulls L the same way and never enters the active set.
+                def cost(z, mom=mom, w=penalty):
+                    x, y = z[:NX], z[NX:]
+                    e = mom.l(y[XQ], y[XV]) - mom.l(x[XQ], x[XV])
+                    return w * (e[0] ** 2 + e[1] ** 2 + e[2] ** 2)
+
+                self.prog.AddCost(cost, zab)
+            else:
+                self.prog.AddConstraint(
+                    d, -box * np.ones(3), box * np.ones(3), zab,
+                    description=f"amom_{a}_{b}")
 
     def _scale(self):
         for p, ph in enumerate(PHASES):

@@ -391,6 +391,14 @@ def main() -> int:
                           "problem reach 11/11. With it on, audit's angular-momentum check is "
                           "enforced rather than emergent, so read the integration check as "
                           "the independent readout of transcription error")
+    ap.add_argument("--amom-penalty", type=float, default=0.0, metavar="W",
+                     help="impose the flight angular-momentum invariant as a COST of weight W "
+                          "instead of a constraint (use with --flight-amom 0). Conservation is "
+                          "an exact consequence of the dynamics, so the constraint form's "
+                          "Jacobian rows are combinations of the collocation defects that "
+                          "already imply them -- kkt_check scores every one at null-space "
+                          "energy 1.00. The penalty pulls L the same way without entering the "
+                          "active set")
     ap.add_argument("--sym-penalty", type=float, default=0.0, metavar="W",
                      help="add W*sum(sq) over every quantity the sagittal/hip/mirror boxes "
                           "bound, so symmetry is carried by the OBJECTIVE instead of by "
@@ -427,7 +435,8 @@ def main() -> int:
         print(f"ipopt: {IPOPT_EXTRA}")
 
     bp = BackflipProgram(amom=args.flight_amom or None, amom_mode=args.amom_mode,
-                         sym_penalty=args.sym_penalty, sym_box=args.sym_box)
+                         sym_penalty=args.sym_penalty, sym_box=args.sym_box,
+                         amom_penalty=args.amom_penalty)
     print(f"program: {bp.prog.num_vars()} vars, {len(bp.prog.GetAllConstraints())} constraints")
 
     def load_checkpoint(path: Path):
