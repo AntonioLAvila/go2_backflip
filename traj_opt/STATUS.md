@@ -100,6 +100,91 @@ knees scrape the floor and its head touches down before its feet do.
 > including to the submodule's own fork remote — the "uncommitted working
 > tree, one accident from data loss" state flagged in the previous note is
 > resolved. See git log for the commit.
+## 2026-09-06: 11/11 — restoration phase, and an invariant nobody had asserted
+
+The campaign log with every hypothesis and verdict is `traj_opt/CONVERGENCE.md`. This is the
+summary.
+
+### What was actually wrong: every burst was in IPOPT's restoration phase
+
+A burst seeded on the shipped point reads:
+
+    iter  objective    inf_pr    inf_du   lg(mu)
+       0  2.783e+01  1.38e-01  9.17e+00    0.0
+       1  2.783e+01  1.37e-01  3.57e+01   -4.4   alpha_pr 6.0e-05
+       2r 2.783e+01  1.37e-01  9.99e+02   -1.9   <-- restoration, at iteration TWO
+     209r 1.704e+01  1.53e+00  1.05e+03          <-- still there 200 iterations later
+
+It enters restoration on the second iteration and never comes back. `inf_pr` does not fall
+there — it *grows*, to 18 by iteration 206. **The restart loop's documented behaviour — a good
+point found early, then 16 straight bursts of degradation, three runs in a row — was a random
+walk in restoration space, chained forward.** Not IPOPT wandering away from good points.
+
+Sixteen solver options were screened at 80 iterations. `--cost-scale 0`, `--proximal`,
+`limited_memory_max_history=50`, `least_square_init_duals`, `bound_mult_init_method=mu-based`
+and `max_soc=10` are **bit-identical to the baseline** — once restoration owns the burst they
+change nothing. `bound_push` confirms the 2026-09-03 setting; no variant beats 1e-8. Only the
+scaling options moved: `nlp_scaling_max_gradient=1` is now a default and takes the
+collocation-vs-integrator check from 6.30e-3 to ~4.1e-3.
+
+`nlp_scaling_method=none` is better still on `max_violation` — 0.1375 to **0.0012** in one
+burst, 114x — and is deliberately **not** used, because that point audits **8/11**: momentum
+drift and integration drift both get worse while the violation collapses. That is the same
+spurious solution this file records at 0.0004 and 0.0495, now reproduced with a far stronger
+solver, which makes it a property of the formulation rather than of search effort.
+
+### The invariant: `--flight-amom`
+
+In flight the only external force is gravity, acting *at* the CoM, so angular momentum about
+the CoM is exactly conserved by the true dynamics. Nothing in the formulation said so, and this
+was the check the project had never once passed. It now has two parts and needs both:
+
+* a **chained** bound on `|L(k+1) - L(k)|`, all three components. Anchoring each knot to knot 0
+  bounds the audit's own quantity directly and measures far worse — 49 rows reaching back to
+  one knot put a dense block through direct collocation's banded Jacobian, taking `inf_pr` to
+  3.95 where the same run without the rows was at 2.87e-3.
+* `AMOM_LATERAL`, an **absolute** box on `|L_x|`, `|L_z|` at every flight knot. Not redundant
+  with `_add_symmetry`, which pins positions and torques and says **nothing about velocities**.
+  Bounding `L_y` alone drove its drift 1.98e-3 → 8.15e-5, a 24x win on the bounded component,
+  and left the check failing at 1.64e-3 on `L_x`. Chaining cannot rescue that either: `|L_x|`
+  is already ~1e-3 at the *first* flight knot, so a difference bound has nothing to hold on to.
+
+`nullity_check` reports 16 with and without these rows — no LICQ cost.
+
+### Two mistakes worth recording
+
+`audit.py`'s momentum check is a max over all three components while its message printed only
+`L_y = ...`; reading that as "the drift is L_y's" is what produced the L_y-only constraint
+above. The message now names the component and prints all three.
+
+And the first version of `check_tape.py` measured torque against `torque_speed_bound()`,
+reporting +28 N.m on the shipped trajectory. `tools/check_envelope.py` already proved the
+halfplanes reproduce that bound to 1e-12 in the motoring quadrant and differ only in braking,
+where it under-rates a back-driven motor — so that number was invented in a quadrant the
+formulation deliberately models differently. It uses the halfplanes now, and says which
+quadrant the worst sample is in.
+
+### The tape, and what is still open
+
+`tools/check_tape.py` (new) asks the audit's physics on the resampled 500 Hz tape. This closes
+the TODO carried since 2026-09-05, and it immediately earns its keep: the 11/11 trajectory
+passes all eleven audit checks and still rings **+4.72 N.m over the design envelope on 2.31%
+of tape samples**. So does the shipped one (+2.33 on 2.60%).
+
+The mechanism is pinned down. `resample()` first-order-holds the knot torques and `|tau| <=
+tau_pk` is linear in `tau`, so convexity carries it between knots — measured at -0.0130 N.m,
+satisfied everywhere. The entire overshoot is the *speed-dependent* halfplane, whose `qd` comes
+from the **cubic state spline**. What rings is joint velocity, not torque, so input-rate
+weighting cannot touch it (three `--w-rate` arms were cancelled on that measurement).
+
+Mesh refinement, the obvious remaining lever, **does not work from a ringing source**. The
+99-knot bisected export starts at `inf_pr` 22.3 and all four arms diverged to 31-120. The
+guess violates the halfplanes by 7.82 N.m, because the new grid's knots are the old grid's
+midpoints — exactly where the tape overshoots. Refinement converts the ringing into hard
+violations at 49 new knots at once. A fix has to come from either a source already clean
+between knots, or the envelope enforced at the Hermite midpoints directly (one dynamics
+evaluation per interval — affordable, not free). That is the next piece of work.
+
 ## 2026-09-05 (last): a 2% actuator safety factor, and the trajectory reshipped under it
 
 The audit said the shipped trajectory's torques were fine — `worst overshoot 0.00e+00 N.m`.
