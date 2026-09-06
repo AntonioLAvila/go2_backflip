@@ -369,3 +369,49 @@ actually measures.
 |---|---|---|---|---|---|
 | H13 | Chaining all three components bounds the check | `--flight-amom`, vector chain | AM passes | L_y to 1e-05, **L_x floors at 1.0-1.1e-3** across every seed | `LOSS` — chain alone cannot anchor L_x |
 | H14 | L_x and L_z are identically zero, so bound them absolutely | `AMOM_LATERAL = 5e-4` | AM passes, 11/11 | runs `r1`-`r5` | `RUN` |
+
+---
+
+# RESULT: 11/11
+
+`n9` burst 1, `traj_opt/out/cand/n9_11of11.npy`. Every audit check passes.
+
+    [PASS] quaternion stays unit without being pinned      worst |q|^2-1 = 6.75e-06
+    [PASS] net rotation is one full backflip               -360.0000 deg, no reversal
+    [PASS] flight CoM is ballistic                         max residual 1.90e-05 m
+    [PASS] flight angular momentum conserved               max drift 9.20e-04 (L_x);
+                                                           per-axis 9.2e-4 / 1.6e-5 / 5.8e-4
+    [PASS] contact forces inside the friction cone         worst slack 2.25e-12 N
+    [PASS] torques inside the enforced halfplanes          worst overshoot 0.00e+00 N.m
+    [PASS] no geometry below the floor                     +0.02 mm at knots, +0.01 between
+    [PASS] non-foot geometry keeps its clearance           +10.00 mm at knots, +7.47 between
+    [PASS] sagittal symmetry holds without being pinned    worst L/R 9.99e-05 rad
+    [PASS] flight is genuinely tucked                      I_yy 0.5090 kg.m^2
+    [PASS] collocation matches a tight integrator          worst drift 4.09e-03 (bound 5e-3)
+    11/11 audit checks passed
+
+Recipe: seed the shipped reference, `nlp_scaling_max_gradient=1`, `--flight-amom 1e-6`
+(three-component chain plus the `AMOM_LATERAL` absolute anchor), short bursts.
+
+## What it is and is not better at
+
+| | shipped | 11/11 point |
+|---|---|---|
+| audit | 9/11 @ 1.97x | **11/11** |
+| flight angular-momentum drift (knots) | 1.97e-3 | **9.20e-4** |
+| collocation vs integrator | 6.30e-3 | **4.09e-3** |
+| flight AM peak-to-peak (tape) | 3.39e-3 | **2.04e-3** |
+| tape vs design envelope | +2.33 N.m on 2.60% | **+10.58 N.m on 6.73%** |
+| tape clearance to HARDWARE peak | 0.481 N.m | **0.502 N.m** |
+
+Better on every audit check and on tape momentum; **worse on tape torque ringing**, by 4.5x in
+magnitude and 2.6x in the fraction of samples affected. It never asks for more than the motor
+can deliver — hardware clearance is actually slightly better at 0.502 N.m — but it spends more
+of the derated envelope, which is authority a tracking policy would otherwise have. That is a
+real regression in the one dimension the 2026-09-05 safety-factor work existed to protect, and
+it is invisible to all eleven audit checks.
+
+So the campaign continues past its own target: find an 11/11 that is *also* clean on the tape.
+Arms `t1`-`t4` sweep `--w-rate` (0.1 default, up to 12) seeded on this point, since input-rate
+weight is precisely the term that decides how much high-frequency content the first-order hold
+has to carry.
