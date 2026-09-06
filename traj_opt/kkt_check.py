@@ -156,9 +156,43 @@ def main() -> int:
     R = M / np.maximum(np.abs(M).max(axis=1, keepdims=True), 1e-300)
     sr = np.linalg.svd(R, compute_uv=False)
     tr = sr.max() * max(R.shape) * np.finfo(float).eps * 100
+    nr = int((sr < tr).sum())
     print(f"row-normalised (what IPOPT's scaling gives it): "
           f"sigma max {sr.max():.3e} min {sr.min():.3e}; "
-          f"cond {sr.max() / sr[sr > 0].min():.2e}; nullity {int((sr < tr).sum())}")
+          f"cond {sr.max() / sr[sr > 0].min():.2e}; nullity {nr}")
+    # The tail of the spectrum decides whether the ill-conditioning is CONFINED to the null
+    # space. If sigma just above the nullity is healthy, the deficiency is a finite set of
+    # redundant rows and removing them leaves a well-conditioned problem; if the spectrum
+    # decays smoothly into the noise floor there is no such set, and no amount of row
+    # surgery makes the KKT system solvable in double precision.
+    tail = np.sort(sr)[:nr + 12]
+    print("  smallest singular values: " + " ".join(f"{v:.2e}" for v in tail))
+    if nr < len(sr):
+        eff = sr.max() / np.sort(sr)[nr]
+        print(f"  effective cond excluding the {nr} null directions: {eff:.2e}")
+
+    if nr:
+        # Family breakdown for the ROW-NORMALISED null space, which is the one that matters:
+        # those are the directions IPOPT's own scaling cannot see either, and the spectrum
+        # shows them separated from the rest by seven orders. Removing exactly these rows is
+        # what would leave a KKT system solvable in double precision.
+        Ur, sru, _ = np.linalg.svd(R, full_matrices=False)
+        er = (Ur[:, np.argsort(sru)[:nr]] ** 2).sum(axis=1)
+        fe, fn = defaultdict(float), defaultdict(int)
+        for lbl, kind, e in zip(labels, kinds, er):
+            fam = f"{lbl.split('#')[0]} ({kind})"
+            fe[fam] += e
+            fn[fam] += 1
+        print(f"\nROW-NORMALISED null space ({nr} directions), energy by call site:")
+        for fam, e in sorted(fe.items(), key=lambda kv: -kv[1])[:args.top]:
+            if e < 1e-3:
+                break
+            print(f"  {e:8.3f}  ({fn[fam]:4d} rows)  {fam}")
+        print("  individual rows above 0.10:")
+        for i in np.argsort(-er)[:24]:
+            if er[i] < 0.10:
+                break
+            print(f"    {er[i]:6.3f}  {labels[i]}  [{kinds[i]}]")
 
     if nullity:
         U, s2, _ = np.linalg.svd(M, full_matrices=False)

@@ -783,3 +783,37 @@ Also worth recording, because it invalidated a comparison: `--feasibility-only` 
 default costed run are **identical** once `--sym-penalty` or `--amom-penalty` is on, because
 those penalties are added in the constructor and `--feasibility-only` only skips `add_cost`.
 Arms f1/f2 and a1/a2 were reading as independent samples and were not.
+
+## M19 — the ill-conditioning is confined to exactly 10 rows, and that changes the outlook
+
+Row-normalising the Jacobian (which is what `nlp_scaling_max_gradient` does, so it is the
+matrix IPOPT actually hands its linear solver) gives a completely different picture from the
+raw numbers this project has been quoting since 2026-09-03:
+
+| | raw | row-normalised |
+|---|---|---|
+| nullity | 35 | **10** |
+| cond | 3.05e+20 | **1.22e+16** |
+
+1.22e+16 is past `1/eps` (~4.5e15), so the scaled KKT system is numerically singular to
+working precision — which is a complete explanation for `inf_du` flooring at 5-57 in every
+one of the sixteen arms, regardless of objective, barrier or start point. Multipliers computed
+from a singular system are noise.
+
+But the spectrum says the singularity is not diffuse:
+
+    4.54e-16 5.84e-16 6.10e-16 6.26e-16 7.39e-16
+    7.90e-16 8.09e-16 8.76e-16 9.14e-16 1.07e-15   <- ten, at the noise floor
+    ------------------------------------------------- seven orders of gap
+    3.94e-09 5.74e-09 8.58e-09 1.76e-08 1.95e-08 ...
+
+    effective cond excluding the 10 null directions: 1.41e+09
+
+**Ten rows are exactly redundant, and with them removed the problem is well conditioned** —
+1.4e9 sits comfortably inside double precision. There is no smooth decay into the noise floor,
+which would have meant no finite set of rows to remove and no path at all.
+
+So Part II is not blocked on something fundamental about direct collocation, the problem size,
+or the quaternion. It is blocked on ten identifiable rows. `kkt_check` now reports the
+row-normalised null space's energy by call site and lists the individual rows carrying it,
+which is what names them.
