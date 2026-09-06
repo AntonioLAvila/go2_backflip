@@ -503,3 +503,48 @@ evaluation per interval — affordable but not free).
 **This is a different result from 2026-09-05's**, which found refinement merely *unhelpful*
 (5% where 16x was predicted). This one is refinement being actively unusable from a ringing
 source, and it supersedes M7's optimism.
+
+---
+
+## M13 — "0.481 N.m clear of the hardware limit" was flat-peak clearance, and it was too generous
+
+`check_tape.py` originally reported hardware headroom as `|tau| <= tau_peak`, with no speed
+derating — the same measure the 2026-09-05 safety-factor work quoted. It gives false comfort. A
+tape can read 0.479 N.m of flat-peak clearance while asking, *at speed*, for more torque than
+the motor can produce. Measured against the hardware **torque-speed** envelope (the halfplane
+form built on datasheet peaks rather than design ones):
+
+| trajectory | over the DESIGN envelope | over the HARDWARE envelope | flat-peak clearance |
+|---|---|---|---|
+| pre-2026-09-06 reference | +2.33 on 2.60% | **+1.85** | 0.481 |
+| `n9` 11/11 | +10.58 on 6.73% | **+10.80** | 0.502 |
+| `r1` 11/11 | +4.72 on 2.31% | **+4.43** | 0.659 |
+| `t3_b2` 11/11 | +5.27 on 1.88% | **+4.95** | 0.788 |
+| **`t3_b0` 11/11 (shipped)** | **+0.79 on 0.44%** | **+0.51** | 0.479 |
+
+Note `t3_b2` and `r1`: the *best* flat-peak clearance of any candidate (0.788, 0.659) with
+nearly ten times the shipped one's real over-demand. Ranking on flat-peak clearance would have
+picked exactly the wrong trajectory. The tool reports the envelope now, with the flat peak as
+a secondary number.
+
+So the 2% actuator safety factor did **not** do what 2026-09-05 concluded it did. It bought
+flat-peak margin, and the between-knot ringing that motivated it happens at speed, where the
+envelope is derated and the margin it bought is proportionally smaller. The shipped
+trajectory's over-demand is down from 1.85 to 0.51 N.m — better by 3.6x, and still not zero.
+
+## Selection: the audit alone would have shipped the wrong one
+
+Thirteen 11/11 candidates across five independent chains, ranked on audit **and** tape:
+
+    t3_b0    11/11   +0.79 N.m on 0.44%   <- shipped
+    r1       11/11   +4.72 on 2.31%
+    t3_b2    11/11   +5.27 on 1.88%
+    n9       11/11  +10.58 on 6.73%
+    q2       11/11  +12.80 on 7.71%
+    u10      11/11  +13.06 on 5.89%
+
+They are indistinguishable on the audit — all eleven checks, margins within a few percent of
+each other — and they span **16x** on the tape. Picking by audit score alone had a good chance
+of shipping something that rings five to thirteen times worse than what it replaced. That is
+the `max_violation` lesson one level further out: the selection criterion has to be measured
+where the artifact is consumed.

@@ -199,8 +199,15 @@ calf both at 100.0% — leaving a tracking policy no torque authority at launch,
 peaks occur. It also absorbs a real hazard: **the audit checks the envelope at knots only, and
 the 500 Hz tape rings between them.** The old trajectory exceeded the enforced envelope by
 4.86 N.m on 6.1% of steps while the audit reported `0.00e+00` overshoot. With the margin, the
-shipped tape now stays 0.481 N.m clear of the hardware limit everywhere. Auditing the resampled
-tape, not just the knots, is still an open TODO.
+shipped tape stayed 0.481 N.m clear of the hardware **flat peak** everywhere.
+
+**That last claim was too generous, and 2026-09-06 corrected it.** 0.481 N.m is clearance
+against `|tau| <= tau_peak` with no speed derating. Measured against the hardware *torque-speed*
+envelope — the same halfplane form, built on the datasheet peaks — that trajectory was over by
+**1.85 N.m**. A safety factor on the flat peak does not protect a tape that rings at speed,
+which is where the ringing actually happens. `tools/check_tape.py` reports both, and the
+trajectory shipped on 2026-09-06 is over by 0.51 N.m rather than 1.85. Auditing the resampled
+tape is no longer a TODO — that is what `check_tape.py` is.
 
 **`traj_opt/warm_start.py`** is mesh refinement, and two things about it are load-bearing.
 **Refine on a `2n-1` grid**, so the new knots are a superset of the old: flight torques swing

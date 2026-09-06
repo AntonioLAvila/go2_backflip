@@ -84,15 +84,28 @@ def main() -> int:
     frac = 100.0 * (over.max(axis=1) > 0).mean()
     i, j = np.unravel_index(int(over.argmax()), over.shape)
     quadrant = "regenerating" if tau[i, j] * qd[i, j] < 0 else "motoring"
-    hw = float((np.abs(tau) - K.hardware_torque_limits()).max())
+    # Against the HARDWARE torque-speed envelope, not merely the flat peak. The flat peak on
+    # its own gives false comfort: it is |tau| <= tau_peak with no speed derating, so a tape
+    # can read "0.479 N.m of clearance" while asking, at speed, for 0.51 N.m more than the
+    # motor can actually produce. Same halfplane form as torque_speed_halfplanes(), built on
+    # the datasheet peaks instead of the design ones -- so this is the real physical question,
+    # and the design-envelope line above is the stricter one the NLP was given.
+    hw_pk = K.hardware_torque_limits()
+    stall_hw = hw_pk / (1.0 - K.CORNER_SPEED_FRAC)
+    k_hw = stall_hw / K.speed_limits()
+    hw = float(np.maximum.reduce([np.abs(tau) - hw_pk,
+                                  tau + k_hw * qd - stall_hw,
+                                  -tau - k_hw * qd - stall_hw]).max())
+    hw_flat = float((np.abs(tau) - hw_pk).max())
 
     ok &= worst <= 0
     print(f"  [{'PASS' if worst <= 0 else 'FAIL'}] torque inside the enforced design envelope"
           f"  -- worst {worst:+.4f} N.m on {frac:.2f}% of samples "
           f"({K.JOINT_NAMES[j]} at t={t[i]:.3f}s, {quadrant})")
     ok &= hw <= 0
-    print(f"  [{'PASS' if hw <= 0 else 'FAIL'}] torque inside the HARDWARE peak"
-          f"  -- worst {hw:+.4f} N.m (negative is clearance)")
+    print(f"  [{'PASS' if hw <= 0 else 'FAIL'}] torque inside the HARDWARE torque-speed "
+          f"envelope  -- worst {hw:+.4f} N.m (negative is clearance); "
+          f"against the flat peak alone {hw_flat:+.4f}")
 
     plant = make_plant()
     L, i0, i1 = flight_window(plant, plant.CreateDefaultContext(), qpos, qvel)
