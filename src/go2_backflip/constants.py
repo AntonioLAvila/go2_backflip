@@ -44,8 +44,30 @@ JOINT_NAMES = [
 ACTUATOR_NAMES = [n.replace("_joint", "") for n in JOINT_NAMES]
 
 # --- Actuator data ----------------------------------------------------------
+# HARDWARE peaks, in N.m. These are the datasheet/MJCF numbers and must keep matching
+# go2.xml's actuator forcerange -- verify_parity Check A compares Drake's effort_limit against
+# MuJoCo's forcerange, and mj_divergence.py clips against these because that is what the real
+# actuator will do. Do NOT derate these; derate DESIGN_TORQUE below.
 PEAK_TORQUE = {"hip": 23.7, "thigh": 23.7, "calf": 45.43}      # N.m
 MAX_SPEED = {"hip": 30.1, "thigh": 30.1, "calf": 15.7}         # rad/s
+
+# What the trajectory optimization is actually allowed to use: a factor of safety, so the
+# reference does not ride the actuator limit and the RL stage inherits margin instead of
+# having to discover it. The shipped 50-knot trajectory hit every limit exactly -- thigh
+# 23.70/23.70 and calf 45.43/45.43, both 100.0%, all three peaks inside launch -- which leaves
+# a tracking policy no torque authority precisely where the maneuver is hardest.
+#
+# The calf is derated from Unitree's ADVERTISED 45 N.m rather than the MJCF's 45.43, so the
+# margin is taken against the number the vendor stands behind.
+TORQUE_SF = 0.98
+NOMINAL_TORQUE = {"hip": 23.7, "thigh": 23.7, "calf": 45.0}
+DESIGN_TORQUE = {k: TORQUE_SF * v for k, v in NOMINAL_TORQUE.items()}
+
+# CORNER_SPEED_FRAC below is deliberately NOT recomputed from DESIGN_TORQUE. Lowering the
+# current limit would move the corner slightly to the RIGHT (1 - 23.226/55.2 = 0.579 for the
+# hip, 0.583 for the calf), so holding it at the 0.571 derived from the full 23.7 N.m ends the
+# flat region marginally early. That is the conservative direction, and it keeps one scalar
+# valid for both reductions instead of two that differ by 0.4 of a percentage point.
 
 KNEE_EXTRA_REDUCTION = PEAK_TORQUE["calf"] / PEAK_TORQUE["hip"]
 
@@ -68,7 +90,15 @@ def joint_kind(name: str) -> str:
 
 
 def torque_limits() -> np.ndarray:
-    """Peak torque per actuator, in JOINT_NAMES order."""
+    """DESIGN torque per actuator, in JOINT_NAMES order -- the limit the optimization and the
+    audit enforce, already carrying TORQUE_SF. Everything that asks "how hard may this
+    trajectory push" wants this. Use hardware_torque_limits() for "what can the motor do"."""
+    return np.array([DESIGN_TORQUE[joint_kind(n)] for n in JOINT_NAMES])
+
+
+def hardware_torque_limits() -> np.ndarray:
+    """Datasheet peak torque per actuator -- what the real actuator and the MJCF will allow,
+    with no factor of safety. Only for simulating the hardware, not for constraining a solve."""
     return np.array([PEAK_TORQUE[joint_kind(n)] for n in JOINT_NAMES])
 
 

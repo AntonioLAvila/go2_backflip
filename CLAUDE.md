@@ -172,6 +172,24 @@ first-order-hold of the *generalized force* (so the contact term at collocation 
 average of endpoint `J^T lambda`, not `J(q_col)^T lambda_col`; contact constraints themselves
 bind at knots only).
 
+**Actuator limits come in two flavours and mixing them up is the trap.** `PEAK_TORQUE` /
+`hardware_torque_limits()` are the datasheet peaks (hip/thigh 23.7, calf 45.43 N.m) and must
+keep matching `go2.xml`'s `forcerange` — `verify_parity` Check A compares Drake's
+`effort_limit()` against MuJoCo's `forcerange`, and `mj_divergence.py` clips against them
+because that is what the real actuator does. `DESIGN_TORQUE` / `torque_limits()` are what the
+**optimization and the audit** enforce: `TORQUE_SF = 0.98` of nominal, i.e. hip/thigh 23.226 and
+calf 44.100, the calf derated from Unitree's advertised 45 rather than the MJCF's 45.43. Every
+solver and audit path calls `torque_limits()`, so the factor applies everywhere by default;
+reach for `hardware_torque_limits()` only when simulating the physical motor.
+
+The factor exists because the trajectory that preceded it rode the limits exactly — thigh and
+calf both at 100.0% — leaving a tracking policy no torque authority at launch, where all three
+peaks occur. It also absorbs a real hazard: **the audit checks the envelope at knots only, and
+the 500 Hz tape rings between them.** The old trajectory exceeded the enforced envelope by
+4.86 N.m on 6.1% of steps while the audit reported `0.00e+00` overshoot. With the margin, the
+shipped tape now stays 0.481 N.m clear of the hardware limit everywhere. Auditing the resampled
+tape, not just the knots, is still an open TODO.
+
 **`traj_opt/warm_start.py`** is mesh refinement, and two things about it are load-bearing.
 **Refine on a `2n-1` grid**, so the new knots are a superset of the old: flight torques swing
 ~13 N.m between adjacent knots on this problem, so a grid that does not retain the old

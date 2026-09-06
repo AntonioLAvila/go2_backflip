@@ -38,7 +38,7 @@ def main() -> None:
 
     base, joint, first_contact = [], [], None
     for k in range(t.size):
-        data.ctrl[:] = np.clip(ctrl[k], -K.torque_limits(), K.torque_limits())
+        data.ctrl[:] = np.clip(ctrl[k], -K.hardware_torque_limits(), K.hardware_torque_limits())
         mujoco.mj_step(m, data)
         if first_contact is None and data.ncon:
             first_contact = t[k]
