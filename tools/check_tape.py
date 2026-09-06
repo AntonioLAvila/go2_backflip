@@ -64,18 +64,28 @@ def main() -> int:
     print(f"{path}: {t.size} samples, {t[-1]:.3f} s")
     ok = True
 
-    # Torque, against the linear halfplanes program.py actually enforces (not the true
-    # non-smooth envelope -- tools/check_envelope.py documents where the two diverge).
-    k_ts, tau_stall = K.torque_speed_halfplanes()
+    # Against torque_speed_halfplanes(), which is both what program.py enforces AND the
+    # physically right envelope. tools/check_envelope.py proves the two agree to 1e-12 in the
+    # motoring quadrant and differ only in braking, where torque_speed_bound() derates on
+    # |qd| and so under-rates a back-driven motor that can in fact hold peak torque. Checking
+    # the tape against torque_speed_bound() therefore invents large failures in exactly the
+    # quadrant the formulation deliberately models the other way -- it reports +28 N.m on the
+    # shipped reference against the halfplanes' +2.3. The quadrant of the worst sample is
+    # printed because that is what says whether an overshoot is a real over-demand.
     qd = qvel[:, 6:]
+    k_ts, tau_stall = K.torque_speed_halfplanes()
     over = np.maximum.reduce([np.abs(tau) - K.torque_limits(),
                               tau + k_ts * qd - tau_stall, -tau - k_ts * qd - tau_stall])
+    worst = float(over.max())
     frac = 100.0 * (over.max(axis=1) > 0).mean()
+    i, j = np.unravel_index(int(over.argmax()), over.shape)
+    quadrant = "regenerating" if tau[i, j] * qd[i, j] < 0 else "motoring"
     hw = float((np.abs(tau) - K.hardware_torque_limits()).max())
-    good = over.max() <= 0
-    ok &= good
-    print(f"  [{'PASS' if good else 'FAIL'}] torque inside the enforced design envelope"
-          f"  -- worst {over.max():+.4f} N.m, on {frac:.2f}% of samples")
+
+    ok &= worst <= 0
+    print(f"  [{'PASS' if worst <= 0 else 'FAIL'}] torque inside the enforced design envelope"
+          f"  -- worst {worst:+.4f} N.m on {frac:.2f}% of samples "
+          f"({K.JOINT_NAMES[j]} at t={t[i]:.3f}s, {quadrant})")
     ok &= hw <= 0
     print(f"  [{'PASS' if hw <= 0 else 'FAIL'}] torque inside the HARDWARE peak"
           f"  -- worst {hw:+.4f} N.m (negative is clearance)")
