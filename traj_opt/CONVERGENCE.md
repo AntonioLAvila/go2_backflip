@@ -327,3 +327,45 @@ Two levers remain for it, in order of preference:
 (peak-to-peak 1.88e-3 against 1e-3), and its torque rings +6.68 N.m over the design envelope
 against the shipped trajectory's +2.33. It is better than shipped on tape momentum
 (1.88e-3 vs 3.39e-3) and worse on tape torque. Whatever ships has to be reported on both.
+
+---
+
+## M10 — the momentum check has a floor at ~1e-3, and it is L_x, and symmetry never pinned velocities
+
+With the three-component chained box on, many independent solves converge to the *same* wall:
+
+| run | box | audit | L_x drift | L_y drift | integration |
+|---|---|---|---|---|---|
+| `n2` b0 | 1e-5 | 10/11 @ 1.10x | 9.55e-4 | 4.3e-4 | 5.50e-3 |
+| `n9` b0 | 1e-6 | 10/11 @ **1.05x** | 1.1e-3 | **1.0e-5** | **2.90e-3** |
+| `n7` b0 | 1e-5 + w_rate 2 | 10/11 @ 1.06x | — | — | — |
+
+`n9` is the shape of the answer: the integration check **passes at 2.90e-3**, comfortably
+inside its 5e-3 bound, and L_y is down at 1.0e-05 under the tight box. The whole thing is now
+held up by **L_x**, which parks at 1.0-1.1e-3 no matter which seed, scaling or box is used.
+
+That flatness is the tell. `_add_symmetry` pins **positions and torques and says nothing about
+velocities** — the velocity-level mirror was deliberately dropped, and its docstring explains
+why (an exact position pin plus its kinematically-conjugate velocity is a rank-deficient pair).
+L_x is a velocity quantity, so nothing in the formulation bounds it. And chaining cannot fix
+it: `|L_x|` is already ~1e-3 at the *first* flight knot, so a difference bound has nothing to
+hold on to.
+
+**The fix is the stronger physical statement.** For a sagittal motion L_x and L_z are not
+merely constant, they are identically **zero**. `AMOM_LATERAL` (5e-4, half the audit's bound,
+so drift of at most twice it still clears) is an absolute box on both at every flight knot.
+An absolute anchor also cannot accumulate, unlike the chain. Measured starting points:
+
+    shipped   max|L_x| 9.71e-4   max|L_z| 3.20e-4
+    n2 best   max|L_x| 9.18e-4   max|L_z| 6.54e-4
+    n9 best   max|L_x| 1.11e-3   max|L_z| 7.95e-4
+
+so it is a ~2x tightening of a quantity whose true value is 0. It is chosen over tightening
+`MIRROR` deliberately: that is the constraint family STATUS records three separate LICQ
+failures in, and it would attack a coordinate-level proxy instead of the quantity the audit
+actually measures.
+
+| # | hypothesis | change | predicted | measured | verdict |
+|---|---|---|---|---|---|
+| H13 | Chaining all three components bounds the check | `--flight-amom`, vector chain | AM passes | L_y to 1e-05, **L_x floors at 1.0-1.1e-3** across every seed | `LOSS` — chain alone cannot anchor L_x |
+| H14 | L_x and L_z are identically zero, so bound them absolutely | `AMOM_LATERAL = 5e-4` | AM passes, 11/11 | runs `r1`-`r5` | `RUN` |

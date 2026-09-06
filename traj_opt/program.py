@@ -121,6 +121,20 @@ NO_SLIP = 1e-3
 # either way, so this is the same autodiff evaluation returning a vector instead of a scalar.
 AMOM_BOX = 1e-4
 
+# Half-width of the ABSOLUTE box on the lateral momentum components, when the flight momentum
+# constraint is on. L_x and L_z are not merely constant for a sagittal motion, they are
+# identically ZERO, and asserting the stronger statement is both more informative and better
+# conditioned than chaining differences: an absolute anchor cannot accumulate.
+#
+# It is needed because _add_symmetry pins POSITIONS and TORQUES and says nothing at all about
+# velocities -- the velocity-level mirror was dropped for LICQ reasons documented there -- and
+# L_x is a velocity quantity. The measured consequence is a floor: across many independent
+# solves the audit's momentum check parked at 1.0e-03 to 1.1e-03, always carried by L_x, while
+# L_y sat at 1e-05 under the chained box. Chaining alone cannot fix that, because |L_x| is
+# already ~1e-03 at the first flight knot; there is nothing for a difference bound to hold on
+# to. Half the audit's 1e-3 bound, so that drift (at most twice this) still clears it.
+AMOM_LATERAL = 5e-4
+
 # The left/right thigh/calf mirror, and the DOFs a sagittal motion holds at zero (quat_x,
 # quat_z, base y, the hips), and the unit-quaternion box. All three were loosened on
 # 2026-09-03 to get them out of the active set, and all three are back at TIGHT, because the
@@ -640,7 +654,8 @@ class BackflipProgram:
                 self.prog.AddConstraint(1.0 - QUAT_BOX <= norm)
                 self.prog.AddConstraint(norm <= 1.0 + QUAT_BOX)
 
-    def _add_flight_momentum(self, box: float, mode: str = "chain"):
+    def _add_flight_momentum(self, box: float, mode: str = "chain",
+                             lateral: float = AMOM_LATERAL):
         """Bound the flight phase's angular-momentum drift. See AMOM_BOX.
 
         Two forms, and the difference is the Jacobian's sparsity, not the physics:
@@ -660,6 +675,17 @@ class BackflipProgram:
         that requires every interval to drift the same direction; measure, do not assume it.
         """
         ph = PHASES[FLIGHT]
+
+        # |L_x| and |L_z| <= lateral at every flight knot. See AMOM_LATERAL.
+        for k in range(ph.n_knots):
+            mom = _Momentum(self.plant, self.plant_ad)
+
+            def lat(z, mom=mom):
+                return mom.l(z[XQ], z[XV])[[0, 2]]
+
+            self.prog.AddConstraint(lat, [-lateral] * 2, [lateral] * 2,
+                                    self.state(FLIGHT, k), description=f"amom_lat_{k}")
+
         pairs = ([(0, k) for k in range(1, ph.n_knots)] if mode == "anchor"
                  else [(k, k + 1) for k in range(ph.n_knots - 1)])
         for a, b in pairs:
