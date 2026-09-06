@@ -136,9 +136,19 @@ def check_ballistic(plant, phases):
     err = max(np.abs(resid_z).max(), np.abs(resid_x).max())
     report("flight CoM is ballistic", err < 1e-3, f"max residual {err:.2e} m", err / 1e-3)
 
-    drift = np.abs(ang - ang[0]).max()
+    # Max over all THREE components, and the message names which one carries it. It used to
+    # print only "L_y = ..." next to that max, which reads as though the drift were L_y's --
+    # it is not, and acting on that misreading cost the 2026-09-06 campaign a run: a
+    # constraint that bounded L_y alone took L_y drift to 8.2e-05 and left this check failing
+    # at 1.6e-03 on L_x. L_x and L_z are zero for a truly sagittal motion, so drift in them is
+    # symmetry leaking, not tumbling.
+    dev = np.abs(ang - ang[0])
+    drift = dev.max()
+    axis = "xyz"[int(np.unravel_index(dev.argmax(), dev.shape)[1])]
     report("flight angular momentum conserved", drift < 1e-3,
-           f"L_y = {ang[0][1]:.3f} N.m.s, max drift {drift:.2e}", drift / 1e-3)
+           f"L = [{ang[0][0]:.3f} {ang[0][1]:.3f} {ang[0][2]:.3f}] N.m.s, "
+           f"max drift {drift:.2e} (in L_{axis}); per-axis "
+           f"{dev[:, 0].max():.1e}/{dev[:, 1].max():.1e}/{dev[:, 2].max():.1e}", drift / 1e-3)
 
 
 def check_contact(phases):

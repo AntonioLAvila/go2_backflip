@@ -111,9 +111,14 @@ NO_SLIP = 1e-3
 # than emergent, and "collocation matches a tight integrator" becomes the only independent
 # readout of transcription error left. Judge a run with amom on by THAT check.
 #
-# The y-component only. L_x and L_z are zero for a sagittal motion and are already implied by
-# _add_symmetry, so constraining them too would add rows that other rows already span --
-# the LICQ failure mode this file's TIGHT comment is about.
+# ALL THREE components, not just y. The first version of this constrained L_y alone, on the
+# argument that L_x and L_z vanish for a sagittal motion and are therefore already implied by
+# _add_symmetry. Measured, that argument is wrong: symmetry is held to a 1e-4 box, which
+# leaves L_x and L_z free to wander at the 1e-3 level, and audit.py's check takes the max over
+# all three components. Constraining y alone drove L_y drift from 1.98e-03 to 8.15e-05 -- a
+# 24x win on exactly the component it bounded -- while the audit still failed at 1.64e-03,
+# now carried by L_x. Three rows cost nothing extra: the spatial momentum is computed in full
+# either way, so this is the same autodiff evaluation returning a vector instead of a scalar.
 AMOM_BOX = 1e-4
 
 # The left/right thigh/calf mirror, and the DOFs a sagittal motion holds at zero (quat_x,
@@ -254,13 +259,14 @@ class _Momentum:
         self.f, self.ad = plant, plant_ad
         self.cf, self.ca = plant.CreateDefaultContext(), plant_ad.CreateDefaultContext()
 
-    def ly(self, q, v):
+    def l(self, q, v):
+        """The full rotational momentum about the CoM -- all three components."""
         ad = q.dtype == object
         plant, ctx = (self.ad, self.ca) if ad else (self.f, self.cf)
         plant.SetPositions(ctx, q)
         plant.SetVelocities(ctx, v)
         com = plant.CalcCenterOfMassPositionInWorld(ctx)
-        return plant.CalcSpatialMomentumInWorldAboutPoint(ctx, com).rotational()[1]
+        return plant.CalcSpatialMomentumInWorldAboutPoint(ctx, com).rotational()
 
 
 class BackflipProgram:
@@ -646,7 +652,7 @@ class BackflipProgram:
         `nlp_scaling_method=none`, anchor took inf_pr to 3.95 by iteration 135 where the same
         run without these rows was at 2.87e-03.
 
-        `chain` (default) bounds |L_y(k+1) - L_y(k)| instead, so every row stays inside one
+        `chain` (default) bounds |L(k+1) - L(k)| instead, so every row stays inside one
         interval and the banded structure survives. The cost is that the drift the audit
         measures can accumulate to (n_knots - 1) * box in the worst case -- 49 * box -- so the
         box has to be set that much tighter. At the 1e-4 default that worst case is 4.9e-3,
@@ -661,10 +667,10 @@ class BackflipProgram:
 
             def d(z, mom=mom):
                 x, y = z[:NX], z[NX:]
-                return np.array([mom.ly(y[XQ], y[XV]) - mom.ly(x[XQ], x[XV])])
+                return mom.l(y[XQ], y[XV]) - mom.l(x[XQ], x[XV])
 
             self.prog.AddConstraint(
-                d, [-box], [box],
+                d, -box * np.ones(3), box * np.ones(3),
                 np.concatenate([self.state(FLIGHT, a), self.state(FLIGHT, b)]),
                 description=f"amom_{a}_{b}")
 

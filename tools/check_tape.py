@@ -32,7 +32,11 @@ from go2_backflip import constants as K                                    # noq
 from program import make_plant                                             # noqa: E402
 
 AMOM_BOUND = 1e-3          # the same bound audit.py holds the knots to
-FOOT_AIR = 5e-3            # foot-sphere clearance that counts as "off the ground"
+# Foot-sphere clearance that counts as "off the ground". The detected window is insensitive
+# to this between 5e-3 and 2e-4 (it moves by one 2 ms sample); below ~1e-4 it collapses,
+# because a foot in stance is only numerically at zero clearance and the whole trajectory
+# then reads as airborne.
+FOOT_AIR = 1e-3
 
 
 def flight_window(plant, ctx, qpos, qvel):
@@ -92,10 +96,16 @@ def main() -> int:
 
     plant = make_plant()
     L, i0, i1 = flight_window(plant, plant.CreateDefaultContext(), qpos, qvel)
-    drift = float(np.abs(L[i0:i1] - L[i0]).max())
+    # PEAK-TO-PEAK, not |L - L[first sample]|. The audit anchors on the first flight KNOT;
+    # this window starts a sample or two later, so anchoring here understates by however much
+    # L had already moved -- measured 8.8e-04 anchored against the audit's 1.50e-03 on the
+    # same trajectory, where the peak-to-peak is 1.47e-03. Peak-to-peak needs no reference
+    # point and upper-bounds every anchored drift, so it cannot flatter the tape.
+    seg = L[i0:i1]
+    drift = float(seg.max() - seg.min())
     ok &= drift < AMOM_BOUND
     print(f"  [{'PASS' if drift < AMOM_BOUND else 'FAIL'}] flight angular momentum conserved"
-          f"  -- L_y = {L[i0]:.3f} N.m.s, max drift {drift:.2e}, bound {AMOM_BOUND:.0e}"
+          f"  -- L_y = {L[i0]:.3f} N.m.s, peak-to-peak {drift:.2e}, bound {AMOM_BOUND:.0e}"
           f"  (flight = t[{t[i0]:.3f}, {t[i1 - 1]:.3f}] s, {i1 - i0} samples)")
     print("tape checks passed" if ok else "TAPE CHECKS FAILED")
     return 0 if ok else 1

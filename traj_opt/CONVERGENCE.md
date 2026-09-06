@@ -262,3 +262,35 @@ already reports two failures the audit cannot see:
 
 This closes the TODO STATUS has carried since 2026-09-05 ("auditing the resampled tape, not
 just the knots, is still an open TODO").
+
+---
+
+## M9 — the audit's momentum check is over all three components, and that cost a run
+
+`check_ballistic` computes `drift = np.abs(ang - ang[0]).max()` on an `(n, 3)` array, so it
+is the max over **L_x, L_y and L_z** — while printing only `L_y = ...` beside it. I read that
+message as "the drift is in L_y" and built `--flight-amom` to bound the y-component alone,
+reasoning that L_x and L_z vanish for a sagittal motion and were already implied by
+`_add_symmetry`.
+
+The constraint did exactly what it was asked and the check still failed:
+
+| point | L_x drift | L_y drift | L_z drift | audit reports |
+|---|---|---|---|---|
+| shipped reference | 4.62e-4 | **1.98e-3** | 4.53e-4 | 1.98e-3 |
+| `e2` burst 1 (no momentum rows) | **1.50e-3** | 6.34e-4 | 1.23e-3 | 1.50e-3 |
+| `m1` burst 0 (L_y bounded, 1e-5) | **1.64e-3** | **8.15e-5** | 1.28e-3 | 1.64e-3 |
+
+L_y fell 1.98e-3 -> 8.15e-5, a 24x win on the one component that was bounded, and the check
+still read 1.64e-3 because L_x had taken over. The premise was wrong: `_add_symmetry` holds a
+**1e-4 box**, not an equality, which leaves L_x and L_z free to wander at exactly the 1e-3
+level the check cares about. Drift there is symmetry leaking, not tumbling.
+
+Fixed both ends. The constraint now bounds all three components — free, since the spatial
+momentum is computed in full either way, so it is the same autodiff evaluation returning a
+vector. And `audit.py` now names the component carrying the drift and prints all three, so
+the message cannot be misread the same way again. `nullity_check` still reports 16.
+
+| # | hypothesis | change | predicted | measured | verdict |
+|---|---|---|---|---|---|
+| H12 | Bounding L_y alone is enough, since symmetry pins L_x and L_z | `_add_flight_momentum`, scalar | AM check passes | L_y 1.98e-3 -> 8.15e-5, **check still fails at 1.64e-3 on L_x** | `LOSS` — now vector-valued |
