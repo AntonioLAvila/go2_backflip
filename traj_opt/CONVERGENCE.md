@@ -232,7 +232,8 @@ Each fixes exactly the check the other leaves. The runs that matter now are the 
 
 ## M8 — a between-knot readout, because knot checks are what got us here
 
-`scratchpad/ring.py` measures, on the resampled 500 Hz tape rather than at knots: torque
+**`tools/check_tape.py`** (new, tracked) measures, on the resampled 500 Hz tape rather than
+at knots: torque
 against the enforced halfplanes and against hardware, and flight angular-momentum drift.
 Flight is detected from foot clearance, not base height — base height is well above its start
 value during launch and absorb, which are contact phases where momentum is *not* conserved,
@@ -250,3 +251,14 @@ tape** — the `amom` point holds 6.5e-4 at knots and rings to 1.7e-3 between th
 fail the 1e-3 bound if the bound were measured where the RL stage actually reads. And the
 better-converged points have *worse* torque ringing, up to +8.6 N.m over the design envelope.
 A candidate has to be judged here, not only by the audit.
+
+It is deliberately **not** a twelfth audit check — the campaign's target is the existing
+eleven, and a trajectory can pass `audit.py` and fail here. On the shipped reference it
+already reports two failures the audit cannot see:
+
+    [FAIL] torque inside the enforced design envelope  -- worst +2.3343 N.m, on 2.60% of samples
+    [PASS] torque inside the HARDWARE peak            -- worst -0.4808 N.m
+    [FAIL] flight angular momentum conserved          -- max drift 2.24e-03, bound 1e-03
+
+This closes the TODO STATUS has carried since 2026-09-05 ("auditing the resampled tape, not
+just the knots, is still an open TODO").
