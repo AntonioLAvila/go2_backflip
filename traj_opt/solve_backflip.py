@@ -354,7 +354,15 @@ def main() -> int:
                      help="scale the performance costs (torque, rate, time, tuck) in the "
                           "costed pass. The symmetry cost is never scaled. At the default 1.0 "
                           "the costed pass walks off the feasible manifold (0.0025 -> 0.73); "
-                          "use 0 for a symmetry-only pass that keeps feasibility")
+                          "0 leaves the objective identically FLAT -- there is no symmetry "
+                          "term in add_cost, whatever its docstring used to claim -- so "
+                          "pair 0 with --proximal to regularise the degenerate null space")
+    ap.add_argument("--w-rate", type=float, default=None, metavar="W",
+                     help="override add_cost's input-rate weight (default 0.1). Raising it "
+                          "smooths u between knots, which is the term that decides how much "
+                          "high-frequency content the first-order hold has to represent -- "
+                          "the suspected source of the between-knot ringing that makes a low "
+                          "max_violation audit badly")
     ap.add_argument("--proximal", type=float, default=0.0, metavar="W",
                      help="add W*||x - seed||^2 (per-variable normalised) to the objective, "
                           "with the seed from --start-checkpoint. Regularises the degenerate "
@@ -362,6 +370,16 @@ def main() -> int:
     ap.add_argument("--ipopt-opt", action="append", default=[], metavar="KEY=VALUE",
                      help="extra IPOPT option, repeatable; ints/floats are parsed as such, "
                           "everything else passed as a string (e.g. mu_strategy=adaptive)")
+    ap.add_argument("--flight-amom", type=float, default=None, metavar="W",
+                     help="enforce |L_y(k) - L_y(0)| <= W over the flight phase, the "
+                          "invariant the true dynamics conserve exactly (program.py:"
+                          "AMOM_BOX). Off by default. With it on, audit's angular-momentum "
+                          "check is enforced rather than emergent -- read the integration "
+                          "check instead")
+    ap.add_argument("--amom-mode", choices=["chain", "anchor"], default="chain",
+                     help="how --flight-amom bounds the drift: chain (banded, per-interval, "
+                          "the default) or anchor (every knot against knot 0 -- bounds the "
+                          "audit's own quantity directly but wrecks the Jacobian sparsity)")
     ap.add_argument("--out", type=Path, default=OUT,
                      help="where to write the trajectory (default traj_opt/out/backflip.npz)")
     ap.add_argument("--warm-start", type=str, default=None,
@@ -381,7 +399,7 @@ def main() -> int:
     if IPOPT_EXTRA:
         print(f"ipopt: {IPOPT_EXTRA}")
 
-    bp = BackflipProgram()
+    bp = BackflipProgram(amom=args.flight_amom, amom_mode=args.amom_mode)
     print(f"program: {bp.prog.num_vars()} vars, {len(bp.prog.GetAllConstraints())} constraints")
 
     def load_checkpoint(path: Path):
@@ -414,6 +432,7 @@ def main() -> int:
         g = Guess(bp.plant)
         set_guess(bp, g.build(), g.footholds())
 
+    cost_kw = {} if args.w_rate is None else {"w_rate": args.w_rate}
     make_opts = snopt_options if args.solver == "snopt" else ipopt_options
     if args.no_prepass:
         if not args.start_checkpoint:
@@ -422,7 +441,7 @@ def main() -> int:
         if not args.restarts:
             raise SystemExit("--no-prepass with no --restarts would solve nothing at all")
         if not args.feasibility_only:
-            bp.add_cost(scale=args.cost_scale)
+            bp.add_cost(scale=args.cost_scale, **cost_kw)
         # Bit-exact (see result_from_vector), so the restart loop begins on the point that was
         # handed in rather than on whatever two long continuous solves made of it.
         result = result_from_vector(bp, x)
@@ -430,7 +449,7 @@ def main() -> int:
         result = solve(bp, make_opts(args.feas_tol, args.opt_tol, args.iters),
                        "feasibility", args.solver)
         if not args.feasibility_only:
-            bp.add_cost(scale=args.cost_scale)
+            bp.add_cost(scale=args.cost_scale, **cost_kw)
             bp.prog.SetInitialGuess(bp.prog.decision_variables(),
                                     result.GetSolution(bp.prog.decision_variables()))
             result = solve(bp, make_opts(args.feas_tol, args.opt_tol / 10, args.iters),
