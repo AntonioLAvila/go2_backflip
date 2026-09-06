@@ -440,7 +440,7 @@ room for `qd` to excurse between them. Arms `t1`,`t2`,`t4` were cancelled on thi
 | # | hypothesis | change | predicted | measured | verdict |
 |---|---|---|---|---|---|
 | H15 | Input-rate weight cuts the tape's torque overshoot | `--w-rate` 1-12 | less ringing | overshoot is entirely in `qd`, which `w_rate` does not touch | `DEAD` |
-| H16 | Refining the flight mesh cuts it | `GO2_FLIGHT_KNOTS=99` from the 11/11 point | less ringing, audit held | runs `w1`,`w2` | `RUN` |
+| H16 | Refining the flight mesh cuts it | `GO2_FLIGHT_KNOTS=99` from the 11/11 point | less ringing, audit held | guess starts at inf_pr **22.3** and all four arms *diverge* to 31-120 | `LOSS` |
 
 ### `GO2_FLIGHT_KNOTS`
 
@@ -477,3 +477,29 @@ where the shipped trajectory gets within 0.481.
 
 Four independent chains (`n9`, `q1`, `q2`, `t3`, `r1`) reached 11/11, so the recipe is
 reproducible rather than a lucky burst.
+
+## M12 — refining a 50-knot solution onto 99 knots diverges, and the reason is the ringing itself
+
+Exporting the 11/11 point onto a bisected 99-knot flight grid gives a guess at `inf_pr` 22.3,
+and four arms (feasibility-only and costed, with and without the momentum rows) all moved
+*away* from it — 31, 31, 82, 120 after 120-200 iterations. Broken down, the guess violates:
+
+    2.232e+01  (135)  collocation defect
+    7.822e+00  (1670) LinearConstraint      <- the torque-speed halfplanes
+    1.460e-02  (99)   floor clearance
+
+The 7.82 N.m on the halfplanes is the whole story, and it is **the between-knot ringing being
+sampled**. Those constraints bind at knots; the new grid's knots are the old grid's midpoints,
+which is exactly where the tape overshoots by ~10 N.m. So refinement does not smooth the
+ringing away — it converts it into hard constraint violations at 49 new knots simultaneously,
+and hands IPOPT a guess that is worse than anything it can walk back from.
+
+That is a genuine catch-22 for this route: the mesh refinement that would fix the ringing
+cannot be started from a solution that has the ringing. A refinement would have to come from a
+point that is already clean between knots, or the envelope would have to be enforced at the
+midpoints directly (a constraint on the Hermite midpoint state, which needs a dynamics
+evaluation per interval — affordable but not free).
+
+**This is a different result from 2026-09-05's**, which found refinement merely *unhelpful*
+(5% where 16x was predicted). This one is refinement being actively unusable from a ringing
+source, and it supersedes M7's optimism.
