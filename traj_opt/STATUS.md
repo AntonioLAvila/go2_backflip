@@ -2,13 +2,24 @@
 
 Last updated 2026-09-05. Not yet converged
 (`is_success()==False`), and it may never need to be — see next steps. Best
-confirmed result, unchanged since 2026-09-04: IPOPT, **10/11 audit checks
-passing, worst failure 1.61x over its threshold**, violation 0.1287, on the
-**50**-knot-flight problem with the 10 mm body-clearance margin, shipped in
+confirmed result: IPOPT, **9/11 audit checks passing, worst failure 1.97x over
+its threshold**, violation 0.1375, on the **50**-knot-flight problem with the
+10 mm body-clearance margin and the **2% actuator safety factor**, shipped in
 `traj_opt/reference/` and reproducible from that directory's `backflip.npy`
-with `--from-checkpoint`. The collocation-vs-integrator check, which had failed
-in every session this file records, now passes; only flight angular momentum is
-left.
+with `--from-checkpoint`.
+
+**The actuator limits the optimization enforces changed on 2026-09-05** to
+hip/thigh **23.226** and calf **44.100** N.m — 98% of the datasheet peaks, with
+the calf taken against Unitree's advertised 45 rather than the MJCF's 45.43.
+Numbers from before that date were measured against the full peaks and are not
+like-for-like. The trajectory that used to be described here as 10/11 at 1.61x
+audits **9/11 at 1134563x** under the current limits: it rode the actuators
+exactly (thigh and calf both 100.0%) and now overshoots by 1.13 N.m.
+
+The two failing checks are flight angular momentum (1.97e-3, bound 1e-3) and
+collocation-vs-integrator (6.30e-3, bound 5e-3). The latter had passed for the
+first time on 2026-09-04 at 3.44e-3 and the safety factor cost it: the maneuver
+is torque-limited, so 2% off the actuators comes out somewhere.
 
 **2026-09-05 refined that mesh to 99 flight knots and it did not help** — 9/11,
 and the angular-momentum drift moved 1.61e-3 → 1.53e-3 where 4th-order
@@ -59,6 +70,60 @@ knees scrape the floor and its head touches down before its feet do.
 > including to the submodule's own fork remote — the "uncommitted working
 > tree, one accident from data loss" state flagged in the previous note is
 > resolved. See git log for the commit.
+## 2026-09-05 (last): a 2% actuator safety factor, and the trajectory reshipped under it
+
+The audit said the shipped trajectory's torques were fine — `worst overshoot 0.00e+00 N.m`.
+Measuring the 500 Hz tape it actually hands downstream said otherwise: **up to 4.86 N.m over the
+enforced envelope on 6.1% of steps**. Both are correct. The audit evaluates constraints at the
+KNOTS; the tape is resampled between them, and the input rings there. It is the same
+between-knot blindness this file records for states — "a cubic that rings between knots while
+satisfying the defects exactly at them" — but on the input, where nothing checks it.
+
+Riding the limit is what made that bite. Peak torque per type on the old trajectory:
+
+| type | peak | limit | | where |
+|---|---|---|---|---|
+| hip | 23.64 | 23.70 | 99.7% | `FL_hip` t=0.220s (launch) |
+| thigh | 23.70 | 23.70 | **100.0%** | `RL_thigh` t=0.380s (launch) |
+| calf | 45.43 | 45.43 | **100.0%** | `RL_calf` t=0.398s (launch) |
+
+All three peaks inside launch, within 0.18 s of each other — the rear-leg extension that sets
+the angular momentum for the whole flip is saturated. Every phase reaches the limit though,
+flight included (23.59/23.69/45.39), so folding and extending the legs is itself torque-limited,
+which is part of why the tuck is weak (I_yy 0.508 against 0.452 for the tuck pose).
+
+**So the optimization now solves against 98% design limits**, keeping the datasheet peaks as
+hardware truth (see the constants.py commit for why they must stay matching go2.xml). Re-solved
+from the old trajectory as a seed, 16 bursts:
+
+| | old traj | new traj |
+|---|---|---|
+| hip peak | 99.7% of hardware | **95.0%** |
+| thigh peak | 100.0% | **98.0%** |
+| calf peak | 100.0% | **97.0%** |
+| 500 Hz tape vs HARDWARE peak | −0.002 N.m | **−0.481 N.m** |
+| tape over the DESIGN envelope | +4.97 N.m on 16.7% of steps | +2.33 N.m on 2.6% |
+| audit under CURRENT limits | 9/11, 1134563x | **9/11, 1.97x** |
+| violation | 1.3275 | **0.1375** |
+
+The margin does its job: the old tape touches the hardware limit to within 2 milli-N.m, the new
+one never gets within 0.481 N.m of it across all 692 samples. The between-knot ringing has not
+gone away — it still puts the tape 2.33 N.m over *design* on 2.6% of steps — but design now sits
+inside hardware, so it no longer means asking for torque the motor cannot deliver.
+
+Cost of the margin, honestly: the collocation-vs-integrator check goes from passing at 3.44e-3
+to failing at 6.30e-3 (bound 5e-3), and angular-momentum drift from 1.61e-3 to 1.97e-3. Both are
+the expected direction — the maneuver is torque-limited, so 2% off the actuators comes out
+somewhere. Shipped with `--force`, because `ship.py` compares against a manifest measured under
+the old limits; under the current ones this is a large improvement, not a regression.
+
+The restart search peaked at burst 5 of 16 and wandered after — third run in a row to peak in
+its first handful of bursts.
+
+**Still unfixed and worth doing: `audit.py` checks the envelope at knots only.** That blindness
+is what let a 4.86 N.m over-demand ship as "0.00 overshoot", and it will do the same to every
+future trajectory. Checking the resampled tape is the fix.
+
 ## 2026-09-05 (later): 99 flight knots does NOT fix the angular momentum check
 
 With `warm_start.py` working, the refinement STATUS has been pointing at since 2026-08-23 was

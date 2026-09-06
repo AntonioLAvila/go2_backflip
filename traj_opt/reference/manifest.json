@@ -1,26 +1,27 @@
 {
-  "source_checkpoint": "traj_opt/out/checkpoints_backflip_k50/best_10of11.npy",
-  "commit": "6dfce06be02197f7cac85f5e28b8a3a079bb3dae",
+  "source_checkpoint": "traj_opt/out/checkpoints_backflip_sf98/best.npy",
+  "commit": "ae266dc791a8bc0f31c2f972228fd50f6c9f48ec",
   "flight_knots": 50,
-  "max_violation": 0.128651,
-  "checks_passed": 10,
-  "checks_failed": 1,
-  "worst_overrun": 1.6089,
+  "max_violation": 0.137501,
+  "checks_passed": 9,
+  "checks_failed": 2,
+  "worst_overrun": 1.9748,
   "failed": [
-    "flight angular momentum conserved"
+    "flight angular momentum conserved",
+    "collocation matches a tight integrator"
   ],
   "margins": {
-    "quaternion stays unit without being pinned": 0.248,
-    "net rotation is one full backflip": 0.0109,
-    "flight CoM is ballistic": 0.0143,
-    "flight angular momentum conserved": 1.6089,
-    "contact forces inside the friction cone": 0.615,
+    "quaternion stays unit without being pinned": 0.4347,
+    "net rotation is one full backflip": 0.004,
+    "flight CoM is ballistic": 0.0071,
+    "flight angular momentum conserved": 1.9748,
+    "contact forces inside the friction cone": 0.6285,
     "torques inside the enforced torque-speed halfplanes": 0.0,
-    "no geometry below the floor": 0.0498,
-    "non-foot geometry keeps its clearance margin": 0.5533,
-    "sagittal symmetry holds without being pinned": 0.2796,
-    "flight is genuinely tucked": 0.9256,
-    "collocation matches a tight integrator": 0.6885
+    "no geometry below the floor": 0.0328,
+    "non-foot geometry keeps its clearance margin": 0.6443,
+    "sagittal symmetry holds without being pinned": 0.2519,
+    "flight is genuinely tucked": 0.9235,
+    "collocation matches a tight integrator": 1.2593
   },
-  "note": "50-knot flight mesh; first point to pass the collocation-vs-integrator check"
+  "note": "Solved under the 2% actuator safety factor (hip/thigh 23.226, calf 44.100 N.m). --force because the manifest it is compared against was measured under the OLD full limits and is not a like-for-like baseline: re-audited under the current limits the outgoing trajectory is 9/11 at 1134563x (1.13 N.m of torque overshoot against a 1e-6 bound), against this one's 9/11 at 1.97x."
 }
