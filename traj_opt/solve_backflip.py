@@ -17,7 +17,7 @@ from pydrake.trajectories import PiecewisePolynomial
 from go2_backflip import constants as K
 import audit
 from guess import Guess
-from program import BackflipProgram, XQ, XV
+from program import AMOM_BOX as K_AMOM, BackflipProgram, XQ, XV
 from schedule import PHASES
 
 OUT = Path(__file__).resolve().parent / "out" / "backflip.npz"
@@ -82,6 +82,18 @@ def ipopt_options(feas: float, opt: float, iters: int) -> SolverOptions:
     # good points" turned out to be.
     for k in ("bound_push", "bound_frac", "slack_bound_push", "slack_bound_frac"):
         o.SetOption(sid, k, 1e-8)
+    # IPOPT's gradient-based scaling is ON by default and caps the max gradient element at
+    # 100. On this problem that is badly wrong: every burst entered the RESTORATION phase on
+    # its second iteration and never left, with inf_pr GROWING from 0.138 to 18 over 206
+    # iterations -- which is what the restart loop's "peaks early then degrades for 16 straight
+    # bursts" actually was. At 1 the burst stays out of restoration and converges: the first
+    # run of it audited 10/11 with the collocation-vs-integrator check passing for the first
+    # time under the safety factor. See traj_opt/CONVERGENCE.md.
+    #
+    # nlp_scaling_method=none goes further on max_violation (0.1375 -> 0.0012 in one burst)
+    # and is NOT the right choice: that point audits 8/11. Lower violation is not a better
+    # trajectory on this problem, which STATUS.md says twice already.
+    o.SetOption(sid, "nlp_scaling_max_gradient", 1.0)
     o.SetOption(sid, "print_level", 5)
     for k, v in IPOPT_EXTRA.items():
         o.SetOption(sid, k, v)
@@ -370,12 +382,15 @@ def main() -> int:
     ap.add_argument("--ipopt-opt", action="append", default=[], metavar="KEY=VALUE",
                      help="extra IPOPT option, repeatable; ints/floats are parsed as such, "
                           "everything else passed as a string (e.g. mu_strategy=adaptive)")
-    ap.add_argument("--flight-amom", type=float, default=None, metavar="W",
-                     help="enforce |L_y(k) - L_y(0)| <= W over the flight phase, the "
-                          "invariant the true dynamics conserve exactly (program.py:"
-                          "AMOM_BOX). Off by default. With it on, audit's angular-momentum "
-                          "check is enforced rather than emergent -- read the integration "
-                          "check instead")
+    ap.add_argument("--flight-amom", type=float, default=K_AMOM, metavar="W",
+                     help=f"bound the flight phase's angular-momentum drift by W "
+                          f"(program.py:AMOM_BOX, default {K_AMOM:g}); pass 0 to disable. "
+                          "In flight the only external force is gravity, acting at the CoM, "
+                          "so L_com is exactly conserved by the true dynamics -- this asserts "
+                          "it. ON BY DEFAULT since 2026-09-06: it is half of what makes this "
+                          "problem reach 11/11. With it on, audit's angular-momentum check is "
+                          "enforced rather than emergent, so read the integration check as "
+                          "the independent readout of transcription error")
     ap.add_argument("--amom-mode", choices=["chain", "anchor"], default="chain",
                      help="how --flight-amom bounds the drift: chain (banded, per-interval, "
                           "the default) or anchor (every knot against knot 0 -- bounds the "
@@ -399,7 +414,7 @@ def main() -> int:
     if IPOPT_EXTRA:
         print(f"ipopt: {IPOPT_EXTRA}")
 
-    bp = BackflipProgram(amom=args.flight_amom, amom_mode=args.amom_mode)
+    bp = BackflipProgram(amom=args.flight_amom or None, amom_mode=args.amom_mode)
     print(f"program: {bp.prog.num_vars()} vars, {len(bp.prog.GetAllConstraints())} constraints")
 
     def load_checkpoint(path: Path):

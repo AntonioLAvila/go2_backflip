@@ -104,6 +104,10 @@ NO_SLIP = 1e-3
 # transcription does not conserve it -- audit.py measures the drift, and it is the check this
 # problem has never passed. This constraint asserts the invariant directly.
 #
+# 1e-6 is the value the 11/11 solve used. The chain accumulates, so the worst case over the
+# 49 flight intervals is 49e-6 = 4.9e-5, comfortably inside audit.py's 1e-3 bound; 1e-5 also
+# reaches 10/11 and 1e-4 is too loose to bind at all.
+#
 # It is an addition, not a relaxation: every continuous solution satisfies it, so the feasible
 # set of the underlying problem is unchanged and only the DISCRETE solution set shrinks -- to
 # the physically consistent members of it. That also costs a diagnostic, and the trade is
@@ -119,7 +123,7 @@ NO_SLIP = 1e-3
 # 24x win on exactly the component it bounded -- while the audit still failed at 1.64e-03,
 # now carried by L_x. Three rows cost nothing extra: the spatial momentum is computed in full
 # either way, so this is the same autodiff evaluation returning a vector instead of a scalar.
-AMOM_BOX = 1e-4
+AMOM_BOX = 1e-6
 
 # Half-width of the ABSOLUTE box on the lateral momentum components, when the flight momentum
 # constraint is on. L_x and L_z are not merely constant for a sagittal motion, they are
