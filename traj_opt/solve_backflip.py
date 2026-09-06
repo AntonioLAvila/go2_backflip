@@ -391,6 +391,18 @@ def main() -> int:
                           "problem reach 11/11. With it on, audit's angular-momentum check is "
                           "enforced rather than emergent, so read the integration check as "
                           "the independent readout of transcription error")
+    ap.add_argument("--sym-penalty", type=float, default=0.0, metavar="W",
+                     help="add W*sum(sq) over every quantity the sagittal/hip/mirror boxes "
+                          "bound, so symmetry is carried by the OBJECTIVE instead of by "
+                          "constraints that the solve then rides. Pair with a loose "
+                          "--sym-box: an active box is what puts these rows back into the "
+                          "KKT system, where they are rank-deficient against the defects "
+                          "that already imply them (kkt_check.py)")
+    ap.add_argument("--sym-box", type=float, default=None, metavar="B",
+                     help="half-width of the sagittal/hip/mirror boxes (default "
+                          "program.MIRROR = 1e-4). Loosen it only alongside --sym-penalty, "
+                          "and check audit's symmetry line, which is an ABSOLUTE 1e-3 and "
+                          "does not move with this")
     ap.add_argument("--amom-mode", choices=["chain", "anchor"], default="chain",
                      help="how --flight-amom bounds the drift: chain (banded, per-interval, "
                           "the default) or anchor (every knot against knot 0 -- bounds the "
@@ -414,7 +426,8 @@ def main() -> int:
     if IPOPT_EXTRA:
         print(f"ipopt: {IPOPT_EXTRA}")
 
-    bp = BackflipProgram(amom=args.flight_amom or None, amom_mode=args.amom_mode)
+    bp = BackflipProgram(amom=args.flight_amom or None, amom_mode=args.amom_mode,
+                         sym_penalty=args.sym_penalty, sym_box=args.sym_box)
     print(f"program: {bp.prog.num_vars()} vars, {len(bp.prog.GetAllConstraints())} constraints")
 
     def load_checkpoint(path: Path):

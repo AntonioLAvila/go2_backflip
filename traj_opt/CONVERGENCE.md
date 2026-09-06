@@ -581,3 +581,112 @@ next piece of work, with the diagnosis already done:
    (M11) and mesh refinement cannot be started from a ringing source (M12). Cost is one
    dynamics evaluation per interval to form the midpoint state.
 2. **Same for the momentum box.** It is enforced at knots and rings to 1.34e-3 between them.
+
+
+---
+---
+
+# Part II — `is_success()` (started 2026-09-06)
+
+Part I hit 11/11 on the audit. This part goes after the other half of the target: IPOPT
+actually converging. Same rules as Part I — never loosen a criterion to pass it, one variable
+per experiment, record negatives.
+
+## M14 — dual infeasibility is the entire blocker, and it is not close
+
+IPOPT's final summary at the shipped 11/11 point, after 250 iterations:
+
+| residual | scaled | unscaled |
+|---|---|---|
+| **Dual infeasibility** | **3.5037e+01** | 1.6589e+02 |
+| Constraint violation | 2.4458e-04 | 5.7966e-01 |
+| Variable bound violation | 2.9808e-09 | 2.9808e-09 |
+| Complementarity | 1.2841e-05 | 9.6049e-05 |
+| **Overall NLP error** | **3.5037e+01** | 1.6589e+02 |
+
+`is_success()` requires the overall NLP error under `tol`, and the overall error **is** the
+dual infeasibility — six orders above the other two. Read that carefully, because it inverts
+the intuition the whole project has been running on:
+
+* the point is essentially **feasible** (2.4e-04 scaled, and that is with `nlp_scaling_max_
+  gradient=1`, which is why the unscaled 0.58 looks so different),
+* it is essentially **complementary** (1.3e-05),
+* it is not **stationary**, by a factor of 3.5e5 over the `tol` the restart loop uses.
+
+So the thing to attack is not feasibility. Every lever in Part I — and every lever in
+STATUS.md before it — was aimed at `max_violation`, which is the residual that is *already
+small enough*. Dual infeasibility that will not fall while the primal residual has is the
+signature of an active-constraint Jacobian without full row rank: the multipliers that would
+make `grad L` vanish are not determined, so no iteration count fixes it.
+
+That matches what STATUS.md measured once, on 2026-09-03, and never followed up: **nullity 202
+of 4672 rows at a solved point, smallest singular values 1e-16, cond(A) = 5.5e20**, with 83 of
+the null-space energy on the left/right mirror, 25.2 on the `q[1]/q[3]/q[5]` box, 14.8 on the
+quaternion-norm box and 9.3 on the hip pins.
+
+**`traj_opt/kkt_check.py`** (new) is the diagnostic: it stacks equality rows *and* active
+inequality rows at a given checkpoint, not just equalities at the guess, and reports rank,
+condition number and null-space energy by call site. `nullity_check.py` answers "will IPOPT
+refuse to start"; this answers "can IPOPT ever converge".
+
+## The first hypothesis follows directly
+
+With a **flat objective** the KKT stationarity condition is `sum lambda_i grad g_i = 0`, which
+`lambda = 0` satisfies at any feasible point — no rank condition needed. If dual infeasibility
+is really about multipliers being undetermined, dropping the objective should collapse it. The
+performance terms are documented as not required for a valid trajectory (`add_cost`: "None of
+these four terms is needed for a valid trajectory"), so this is an affordable thing to test
+before touching the constraint structure.
+
+It is also a weaker claim, and worth being explicit about: `is_success()` on a feasibility
+problem means "found a feasible point", not "found an optimum". If that is what converges,
+say so plainly rather than quoting it as convergence of the costed problem.
+
+| # | hypothesis | change | predicted | measured | verdict |
+|---|---|---|---|---|---|
+| K1 | A flat objective removes the stationarity requirement that the degenerate active set cannot meet | `--feasibility-only` | dual infeasibility collapses | **falls into RESTORATION by iteration 199** and sits at inf_du 7.4e+01; the costed arm is at 4.4e+00 and not in restoration | `LOSS` |
+| K2 | Same, via zero-weighted cost terms rather than no cost object | `--cost-scale 0` | same as K1 | bit-identical to K1 | `LOSS` |
+| K3 | The costed problem converges given enough iterations | 3000-iteration burst | — | descending cleanly, inf_du 9.07e+03 -> 4.35e+00 by iteration 222 | `RUN` |
+| K4 | Tighter tolerances on the feasibility problem still converge | `--opt-tol 1e-6 --feas-tol 1e-8` | — | same restoration as K1 | `LOSS` |
+| K5 | Removing exactly-redundant symmetry rows fixes the rank deficiency | `_symmetry_implied` | nullity falls a lot | nullity **192 -> 188**, 159 bindings removed. Correct, but not the fix | `NULL` |
+| K6 | Symmetry belongs in the objective, not the active set | `--sym-penalty W --sym-box B` | the boxes go inactive, nullity collapses | runs `b1`-`b5` | `RUN` |
+
+## M15 — the flat objective was exactly backwards
+
+K1's reasoning was that with `f = 0` the stationarity condition `sum lambda_i grad g_i = 0` is
+satisfied by `lambda = 0` at any feasible point, needing no rank condition — so dual
+infeasibility should collapse. Measured, `--feasibility-only` is **worse**: it is in
+restoration by iteration 199 at inf_du 7.4e+01, while the costed problem is out of restoration
+and descending at 4.4e+00.
+
+The reasoning ignored what STATUS already says about this exact case: a flat objective leaves
+the ~200-dimensional degenerate subspace with no curvature at all, which gives IPOPT's
+limited-memory quasi-Newton approximation nothing to resolve it with. `lambda = 0` being *a*
+KKT point does not help an interior-point method that has to get there along a barrier path.
+
+That reframes K6 rather than killing it. What is wanted is not *less* objective but an
+objective that is **strictly convex in precisely the degenerate directions** — which is what a
+symmetry penalty is, and what `--proximal` was reaching for less specifically.
+
+## M16 — where the 188 rows of deficiency actually sit
+
+`kkt_check.py` at the shipped point, after K5:
+
+    rows: 5936 (5756 equality, 180 active inequality), free cols: 6412
+    rank 5748, sigma_min 1.0e-16, cond 4.1e+21, NULLITY = 188
+
+    30.43  (31 rows)  _add_symmetry:544 (act)   <- q[1],q[3],q[5] box
+    13.10  (17 rows)  _add_symmetry:556 (act)   <- L/R mirror box
+     8.54  (26 rows)  _add_symmetry:548 (act)   <- hip pins
+     7.64  (19 rows)  _add_boundary:691 (eq)    <- x0 position pin
+     7.63  (74 rows)  _add_stitching:653 (eq)   <- phase state continuity
+     5.08  (12 rows)  _add_boundary:699 (eq)    <- final joint pin
+     4.24  ( 6 rows)  _add_symmetry:555 (act)
+
+**80 active symmetry rows carry 56 of the null-space energy.** They are inequalities the solve
+rides: the trajectory sits at 9.99e-05 against a 1e-4 box, so every one of them is active, and
+each is rank-deficient against the collocation defect that already implies it once the same
+pin holds at two consecutive knots. Making them boxes rather than equalities (the 2026-09-03
+fix) kept them out of the *equality* rank requirement and did nothing about this, because an
+active inequality is back in the KKT system either way.
+

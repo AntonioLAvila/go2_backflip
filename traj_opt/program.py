@@ -288,7 +288,10 @@ class _Momentum:
 
 
 class BackflipProgram:
-    def __init__(self, amom: float | None = None, amom_mode: str = "chain"):
+    def __init__(self, amom: float | None = None, amom_mode: str = "chain",
+                 sym_penalty: float = 0.0, sym_box: float | None = None):
+        self.sym_penalty = sym_penalty
+        self.sym_box = MIRROR if sym_box is None else sym_box
         self.plant = make_plant()
         self.plant_ad = self.plant.ToAutoDiffXd()
         self.B = self.plant.MakeActuationMatrix()
@@ -449,6 +452,34 @@ class BackflipProgram:
             implied.add(ph.n_knots - 1)                 # xf pins all of v to zero
         return implied
 
+    @staticmethod
+    def _symmetry_implied(p, ph):
+        """Knots where the position-level symmetry rows are already imposed by something else.
+
+        Same idea, and the same LICQ motivation, as _noslip_implied. An exactly redundant row
+        is not free: once the solve rides a TIGHT box that row is an ACTIVE inequality and is
+        back in the KKT system, rank-deficient against whatever already implied it.
+        kkt_check.py measures the cost -- nullity 192 and cond 3.2e21 at the shipped point,
+        with the three families dropped here carrying 60 of the null-space energy.
+
+        * phase 0 knot 0: _add_boundary pins the whole of x0[XQ] to HOME, whose hips are 0 and
+          whose legs are mirrored, so every row here is a duplicate of an exact equality.
+        * last phase, last knot: _add_boundary pins the base quaternion to [-1,0,0,0] and all
+          twelve joints to HOME_LEGS. Base Y is NOT pinned there (only base X is boxed), so
+          the caller keeps q[5] and drops the rest.
+        * knot 0 of every later phase: _add_stitching makes it the previous phase's final knot
+          by an exact equality, and that knot carries its own copy. The impact phase is
+          included: its continuity row covers XQ, which is all these rows need.
+        """
+        implied = set()
+        if p == 0:
+            implied.add(0)
+        else:
+            implied.add(0)
+        if p == len(PHASES) - 1:
+            implied.add(ph.n_knots - 1)
+        return implied
+
     # --- actuator envelope, joint and speed limits -------------------------
     def _add_actuator_limits(self):
         k_ts, tau_stall = K.torque_speed_halfplanes()
@@ -499,21 +530,31 @@ class BackflipProgram:
         remaining nullity on exactly these two families -- TIGHT-boxed for the same reason the
         foot-pin/quat-norm/leg-mirror families were.
         """
+        box = self.sym_box
+        pen = []
         for p, ph in enumerate(PHASES):
+            skip = self._symmetry_implied(p, ph)
             for k in range(ph.n_knots):
                 x, u = self.state(p, k), self.u[p][k]
                 q, v = x[XQ], x[XV]
-                self.prog.AddBoundingBoxConstraint(
-                    -SAGITTAL_BOX, SAGITTAL_BOX, [q[1], q[3], q[5]])
                 self.prog.AddBoundingBoxConstraint(-WY_MAX, 0.0, v[1])
-                for j in K.HIP_IDX:
-                    self.prog.AddBoundingBoxConstraint(-SAGITTAL_BOX, SAGITTAL_BOX, q[7 + j])
+                # Base y is never implied by a boundary condition -- _add_boundary pins the
+                # final base X, not Y -- so it stays even where the rest is dropped.
+                zeroed = [q[5]] if k in skip else [q[1], q[3], q[5]]
+                self.prog.AddBoundingBoxConstraint(-box, box, zeroed)
+                pen.extend(zeroed)
+                if k not in skip:
+                    for j in K.HIP_IDX:
+                        self.prog.AddBoundingBoxConstraint(-box, box, q[7 + j])
+                        pen.append(q[7 + j])
                 for a, b in ((0, 3), (6, 9)):          # FL/FR and RL/RR leg blocks
                     self.prog.AddLinearConstraint(u[a] + u[b] == 0.0)
                     for d in (1, 2):
                         diff = q[7 + a + d] - q[7 + b + d]
-                        self.prog.AddLinearConstraint(-MIRROR <= diff)
-                        self.prog.AddLinearConstraint(diff <= MIRROR)
+                        if k not in skip:
+                            self.prog.AddLinearConstraint(-box <= diff)
+                            self.prog.AddLinearConstraint(diff <= box)
+                            pen.append(diff)
                         self.prog.AddLinearConstraint(u[a + d] == u[b + d])
                 for i, j in self._mirror_contact_pairs(ph):
                     self.prog.AddLinearConstraint(self.lam[p][k][i, 0] == self.lam[p][k][j, 0])
@@ -537,6 +578,15 @@ class BackflipProgram:
         # Strictly inside TUCK_BOX, so the two never conflict. The first and last TUCK_RAMP
         # knots stay free: the rear leg leaves the ground extended and has to fold, and both
         # legs have to come back out for the landing.
+        if self.sym_penalty:
+            # Sum of squares of every quantity the boxes above bound. Blocked so one binding
+            # does not carry thousands of variables.
+            for i in range(0, len(pen), 200):
+                blk = pen[i:i + 200]
+                self.prog.AddCost(self.sym_penalty * sum(e ** 2 for e in blk))
+            print(f"symmetry penalty: weight {self.sym_penalty:g} on {len(pen)} terms, "
+                  f"box {box:g}")
+
         t_lo, t_hi = K.FLIGHT_TUCK["thigh"]
         c_lo, c_hi = K.FLIGHT_TUCK["calf"]
         for k in range(TUCK_RAMP, PHASES[FLIGHT].n_knots - TUCK_RAMP):
