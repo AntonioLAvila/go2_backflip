@@ -415,3 +415,38 @@ So the campaign continues past its own target: find an 11/11 that is *also* clea
 Arms `t1`-`t4` sweep `--w-rate` (0.1 default, up to 12) seeded on this point, since input-rate
 weight is precisely the term that decides how much high-frequency content the first-order hold
 has to carry.
+
+---
+
+## M11 — the tape's torque overshoot is a *velocity* artefact, so smoothing torque cannot fix it
+
+`resample()` first-order-holds the knot torques, and the flat-peak constraint `|tau| <= tau_pk`
+is linear in tau alone — so if it holds at both knots, convexity gives it everywhere between.
+Measured, it does:
+
+| | flat-peak term | speed-dependent term |
+|---|---|---|
+| shipped | **-0.0068** | +2.3343 |
+| 11/11 point | **-0.0130** | +10.5842 |
+
+The entire tape overshoot is the speed-dependent halfplane `tau + k*qd <= tau_stall`, and `qd`
+on the tape comes from the **cubic state spline**, not from an interpolation of the knots. So
+what rings is the joint velocity between knots, not the torque.
+
+**That kills the `--w-rate` idea before it cost a full run.** Weighting input rate smooths
+`tau`, and `tau` is not what is ringing. The lever is mesh resolution: more knots means less
+room for `qd` to excurse between them. Arms `t1`,`t2`,`t4` were cancelled on this measurement.
+
+| # | hypothesis | change | predicted | measured | verdict |
+|---|---|---|---|---|---|
+| H15 | Input-rate weight cuts the tape's torque overshoot | `--w-rate` 1-12 | less ringing | overshoot is entirely in `qd`, which `w_rate` does not touch | `DEAD` |
+| H16 | Refining the flight mesh cuts it | `GO2_FLIGHT_KNOTS=99` from the 11/11 point | less ringing, audit held | runs `w1`,`w2` | `RUN` |
+
+### `GO2_FLIGHT_KNOTS`
+
+`schedule.py`'s flight knot count is now overridable by that environment variable. Editing the
+number in the file is a documented footgun — every 50-knot checkpoint in `traj_opt/out/` stops
+loading the moment it changes, *including the ones a concurrent search is still writing*, and
+`warm_start.py` has to export before the edit while the file still matches the source. The env
+var keeps both meshes runnable at once, which is what let the refinement start without
+stopping fifteen 50-knot chains.

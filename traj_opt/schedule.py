@@ -12,6 +12,7 @@ therefore what breaks contact first.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
 ALL = ("FL", "FR", "RL", "RR")
@@ -38,10 +39,19 @@ class Phase:
 # the old formulation stalled at 2.13 growing to 32) -- but the extra freedom is what let the
 # search reach the spurious 0.0004 point that audits 7/11. Growing flight is available again;
 # it is just not obviously wanted.
+# Overridable by GO2_FLIGHT_KNOTS so a mesh-refinement run can happen SIDE BY SIDE with
+# 50-knot work instead of requiring an edit here. Editing the number is a documented footgun:
+# every 50-knot checkpoint in traj_opt/out/ stops loading the moment it changes, including the
+# ones a concurrent search is still writing, and warm_start.py has to export BEFORE the edit
+# while this file still matches the source checkpoint. An env var keeps both worlds runnable:
+#     GO2_FLIGHT_KNOTS=99 uv run traj_opt/solve_backflip.py --warm-start ...
+# Refine on a 2n-1 grid so the new knots are a superset of the old -- see warm_start.py.
+FLIGHT_KNOTS = int(os.environ.get("GO2_FLIGHT_KNOTS", "50"))
+
 PHASES = (
     Phase("load", ALL, 12, 0.004, 0.020),
     Phase("launch", ("RL", "RR"), 12, 0.004, 0.020),
-    Phase("flight", (), 50, 0.004, 0.032),
+    Phase("flight", (), FLIGHT_KNOTS, 0.004, 0.032),
     Phase("absorb", ALL, 16, 0.004, 0.025),
 )
 
