@@ -26,7 +26,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "traj_opt"))
 
 import audit                                                    # noqa: E402
-from program import BackflipProgram                             # noqa: E402
+from program import AMOM_BOX, BackflipProgram                   # noqa: E402
 from schedule import PHASES                                     # noqa: E402
 from solve_backflip import (extract, max_violation, resample,    # noqa: E402
                             result_from_vector, save)
@@ -45,9 +45,16 @@ def main() -> int:
     ap.add_argument("--force", action="store_true",
                     help="ship even though it audits worse than what is already shipped")
     ap.add_argument("--note", default="", help="one line recorded in the manifest")
+    ap.add_argument("--flight-amom", type=float, default=AMOM_BOX, metavar="W",
+                    help="build the program with the flight angular-momentum box, so the "
+                         "manifest's max_violation is measured against the same formulation "
+                         "the checkpoint was solved under. The audit itself does not depend "
+                         "on it -- it measures the trajectory, not the program -- so this "
+                         "only affects the recorded violation")
+    ap.add_argument("--amom-mode", choices=["chain", "anchor"], default="chain")
     args = ap.parse_args()
 
-    bp = BackflipProgram()
+    bp = BackflipProgram(amom=args.flight_amom or None, amom_mode=args.amom_mode)
     x = np.load(args.checkpoint)
     if x.shape != (bp.prog.num_vars(),):
         raise SystemExit(f"{args.checkpoint}: {x.shape[0]} variables, this program has "
@@ -77,6 +84,7 @@ def main() -> int:
                                  text=True).stdout.strip(),
         "flight_knots": PHASES[2].n_knots,
         "max_violation": round(viol, 6),
+        "flight_amom": args.flight_amom,
         "checks_passed": len(a.checks) - a.n_failed,
         "checks_failed": a.n_failed,
         "worst_overrun": round(a.worst, 4),

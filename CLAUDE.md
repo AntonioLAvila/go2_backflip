@@ -16,6 +16,10 @@ calculations) is in the plan this was built from; the day-to-day numeric state o
 optimization (current best result, what's converged, what isn't) is **not** in this file — see
 `traj_opt/STATUS.md`, which is the living log and is updated every session. Read it before
 assuming anything about where the optimization currently stands.
+**`traj_opt/CONVERGENCE.md`** is the 2026-09-06 convergence campaign's ledger — every
+hypothesis tried on getting the audit to 11/11, what was predicted, what was measured, and
+what is therefore ruled out. Read it before re-trying anything on convergence; sixteen solver
+options were screened and only the scaling ones mattered.
 
 ## Environment
 
@@ -75,6 +79,14 @@ uv run traj_opt/mj_divergence.py
 # sanity-check the linear torque-speed envelope against the true (non-smooth) one:
 uv run tools/tuck_box.py
 uv run tools/check_envelope.py
+
+# Ask the audit's physics on the resampled 500 Hz tape rather than at the knots -- torque
+# against the enforced halfplanes and against hardware, and flight angular-momentum drift.
+# NOT a twelfth audit check: a trajectory can pass all eleven and fail this.
+uv run tools/check_tape.py [traj_opt/reference/backflip.npz]
+
+# Mesh refinement without editing schedule.py (see GO2_FLIGHT_KNOTS below):
+GO2_FLIGHT_KNOTS=99 uv run traj_opt/solve_backflip.py --warm-start traj_opt/out/refine/warm99.npz
 
 # Promote a solved checkpoint to the tracked reference trajectory (re-audits, refuses a
 # regression unless --force):
@@ -187,8 +199,15 @@ calf both at 100.0% — leaving a tracking policy no torque authority at launch,
 peaks occur. It also absorbs a real hazard: **the audit checks the envelope at knots only, and
 the 500 Hz tape rings between them.** The old trajectory exceeded the enforced envelope by
 4.86 N.m on 6.1% of steps while the audit reported `0.00e+00` overshoot. With the margin, the
-shipped tape now stays 0.481 N.m clear of the hardware limit everywhere. Auditing the resampled
-tape, not just the knots, is still an open TODO.
+shipped tape stayed 0.481 N.m clear of the hardware **flat peak** everywhere.
+
+**That last claim was too generous, and 2026-09-06 corrected it.** 0.481 N.m is clearance
+against `|tau| <= tau_peak` with no speed derating. Measured against the hardware *torque-speed*
+envelope — the same halfplane form, built on the datasheet peaks — that trajectory was over by
+**1.85 N.m**. A safety factor on the flat peak does not protect a tape that rings at speed,
+which is where the ringing actually happens. `tools/check_tape.py` reports both, and the
+trajectory shipped on 2026-09-06 is over by 0.51 N.m rather than 1.85. Auditing the resampled
+tape is no longer a TODO — that is what `check_tape.py` is.
 
 **`traj_opt/warm_start.py`** is mesh refinement, and two things about it are load-bearing.
 **Refine on a `2n-1` grid**, so the new knots are a superset of the old: flight torques swing
@@ -209,5 +228,44 @@ Refinement is not, however, a way to buy accuracy here. 50→99 moved the one fa
 violation ~0.14 the discretization error is an order of magnitude below the residual
 infeasibility. See `traj_opt/STATUS.md`, 2026-09-05.
 
+**Two settings are what take the audit from 9/11 to 11/11, and both are defaults now.**
+
+**`nlp_scaling_max_gradient = 1`** in `solve_backflip.ipopt_options`. IPOPT's gradient-based
+scaling is on by default and caps the max gradient element at 100; on this problem that put
+every restart burst into IPOPT's **restoration phase on its second iteration**, where it
+stayed for the rest of the burst while `inf_pr` *grew* — 0.138 to 18 over 206 iterations. The
+restart loop's long-documented "finds a good point early, then degrades for 16 straight
+bursts" was that, not IPOPT wandering. Note `nlp_scaling_method=none` goes much further on
+`max_violation` (0.1375 → 0.0012 in one burst) and is **not** what you want: that point audits
+8/11. Same lesson as everywhere else in this repo — lower violation is not a better trajectory.
+
+**`--flight-amom`** (`program.py:_add_flight_momentum`, box `AMOM_BOX = 1e-6`, on by default;
+pass `0` to disable). In flight the only external force is gravity, which acts *at* the CoM, so
+angular momentum about the CoM is exactly conserved by the true dynamics — and nothing in the
+formulation said so. Two parts, and both are needed: a **chained** bound on `|L(k+1) - L(k)|`
+over all three components (chained, not anchored to knot 0 — 49 rows reaching back to one knot
+put a dense block through direct collocation's banded Jacobian and measured far worse), plus
+`AMOM_LATERAL`, an **absolute** box on `|L_x|` and `|L_z|` at every flight knot. The absolute
+part is not redundant: `_add_symmetry` pins positions and torques and says nothing about
+velocities, `L_x` is a velocity quantity, and without the anchor the audit's momentum check
+floors at 1.0e-3 on `L_x` no matter what the chain does to `L_y`. With `--flight-amom` on, the
+audit's momentum check is *enforced* rather than emergent, so read
+`collocation matches a tight integrator` as the independent readout of transcription error.
+
+**`tools/check_tape.py`** asks the audit's physics on the resampled 500 Hz tape instead of at
+the knots — torque against the enforced halfplanes (and against hardware), and flight
+angular-momentum drift. It is deliberately not a twelfth audit check: a trajectory can pass all
+eleven and fail this, and the shipped one does. Use `torque_speed_halfplanes()` and never
+`torque_speed_bound()` for tape torque — `tools/check_envelope.py` proves they agree to 1e-12
+in the motoring quadrant and differ only in braking, where the latter under-rates a back-driven
+motor and invents +28 N.m failures that are not real.
+
+**`GO2_FLIGHT_KNOTS`** overrides `schedule.py`'s flight knot count, so a mesh-refinement run
+can happen side by side with 50-knot work. Editing the number in the file breaks every 50-knot
+checkpoint in `traj_opt/out/` the moment it changes, including ones a concurrent search is
+still writing.
+
 Solver preference: IPOPT over SNOPT for this contact-rich problem (SNOPT has never once
-returned success here). Both are still runnable via `--solver`.
+returned success here). Both are still runnable via `--solver`. Note also that Drake's
+`SetVariableScaling` is a **no-op under IPOPT** (it says so in a warning), so `program._scale()`
+has never affected any IPOPT solve this repo has run — it is live for SNOPT only.

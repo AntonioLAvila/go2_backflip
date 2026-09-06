@@ -98,6 +98,47 @@ TIGHT = 1e-4
 # opposite of what a push-off does.
 NO_SLIP = 1e-3
 
+# Half-width of the flight angular-momentum box, when BackflipProgram(amom=...) enables it.
+# In flight the only external force is gravity; it acts AT the centre of mass, so its moment
+# about the CoM is identically zero and L_com is EXACTLY conserved by the true dynamics. The
+# transcription does not conserve it -- audit.py measures the drift, and it is the check this
+# problem has never passed. This constraint asserts the invariant directly.
+#
+# 1e-6 is the value the 11/11 solve used. The chain accumulates, so the worst case over the
+# 49 flight intervals is 49e-6 = 4.9e-5, comfortably inside audit.py's 1e-3 bound; 1e-5 also
+# reaches 10/11 and 1e-4 is too loose to bind at all.
+#
+# It is an addition, not a relaxation: every continuous solution satisfies it, so the feasible
+# set of the underlying problem is unchanged and only the DISCRETE solution set shrinks -- to
+# the physically consistent members of it. That also costs a diagnostic, and the trade is
+# deliberate: once this is on, audit's "flight angular momentum conserved" is enforced rather
+# than emergent, and "collocation matches a tight integrator" becomes the only independent
+# readout of transcription error left. Judge a run with amom on by THAT check.
+#
+# ALL THREE components, not just y. The first version of this constrained L_y alone, on the
+# argument that L_x and L_z vanish for a sagittal motion and are therefore already implied by
+# _add_symmetry. Measured, that argument is wrong: symmetry is held to a 1e-4 box, which
+# leaves L_x and L_z free to wander at the 1e-3 level, and audit.py's check takes the max over
+# all three components. Constraining y alone drove L_y drift from 1.98e-03 to 8.15e-05 -- a
+# 24x win on exactly the component it bounded -- while the audit still failed at 1.64e-03,
+# now carried by L_x. Three rows cost nothing extra: the spatial momentum is computed in full
+# either way, so this is the same autodiff evaluation returning a vector instead of a scalar.
+AMOM_BOX = 1e-6
+
+# Half-width of the ABSOLUTE box on the lateral momentum components, when the flight momentum
+# constraint is on. L_x and L_z are not merely constant for a sagittal motion, they are
+# identically ZERO, and asserting the stronger statement is both more informative and better
+# conditioned than chaining differences: an absolute anchor cannot accumulate.
+#
+# It is needed because _add_symmetry pins POSITIONS and TORQUES and says nothing at all about
+# velocities -- the velocity-level mirror was dropped for LICQ reasons documented there -- and
+# L_x is a velocity quantity. The measured consequence is a floor: across many independent
+# solves the audit's momentum check parked at 1.0e-03 to 1.1e-03, always carried by L_x, while
+# L_y sat at 1e-05 under the chained box. Chaining alone cannot fix that, because |L_x| is
+# already ~1e-03 at the first flight knot; there is nothing for a difference bound to hold on
+# to. Half the audit's 1e-3 bound, so that drift (at most twice this) still clears it.
+AMOM_LATERAL = 5e-4
+
 # The left/right thigh/calf mirror, and the DOFs a sagittal motion holds at zero (quat_x,
 # quat_z, base y, the hips), and the unit-quaternion box. All three were loosened on
 # 2026-09-03 to get them out of the active set, and all three are back at TIGHT, because the
@@ -228,8 +269,26 @@ class _Floor:
         return np.concatenate(z) - self.radii
 
 
+class _Momentum:
+    """Angular momentum about the instantaneous CoM, over one plant/context pair per
+    constraint -- same one-context-per-constraint rule as _Kin and _Floor."""
+
+    def __init__(self, plant, plant_ad):
+        self.f, self.ad = plant, plant_ad
+        self.cf, self.ca = plant.CreateDefaultContext(), plant_ad.CreateDefaultContext()
+
+    def l(self, q, v):
+        """The full rotational momentum about the CoM -- all three components."""
+        ad = q.dtype == object
+        plant, ctx = (self.ad, self.ca) if ad else (self.f, self.cf)
+        plant.SetPositions(ctx, q)
+        plant.SetVelocities(ctx, v)
+        com = plant.CalcCenterOfMassPositionInWorld(ctx)
+        return plant.CalcSpatialMomentumInWorldAboutPoint(ctx, com).rotational()
+
+
 class BackflipProgram:
-    def __init__(self):
+    def __init__(self, amom: float | None = None, amom_mode: str = "chain"):
         self.plant = make_plant()
         self.plant_ad = self.plant.ToAutoDiffXd()
         self.B = self.plant.MakeActuationMatrix()
@@ -276,6 +335,8 @@ class BackflipProgram:
         self._add_body_clearance()
         self._add_stitching()
         self._add_boundary()
+        if amom is not None:
+            self._add_flight_momentum(amom, amom_mode)
         self._scale()
 
     # --- helpers ---------------------------------------------------------
@@ -597,6 +658,52 @@ class BackflipProgram:
                 self.prog.AddConstraint(1.0 - QUAT_BOX <= norm)
                 self.prog.AddConstraint(norm <= 1.0 + QUAT_BOX)
 
+    def _add_flight_momentum(self, box: float, mode: str = "chain",
+                             lateral: float = AMOM_LATERAL):
+        """Bound the flight phase's angular-momentum drift. See AMOM_BOX.
+
+        Two forms, and the difference is the Jacobian's sparsity, not the physics:
+
+        `anchor` compares every knot against knot 0, which bounds exactly the quantity the
+        audit reports -- and measured much worse. Direct collocation's Jacobian is block
+        banded (each row touches one interval), and 49 rows that each reach back to knot 0
+        put a dense column block through the middle of it. Seeded on the shipped point under
+        `nlp_scaling_method=none`, anchor took inf_pr to 3.95 by iteration 135 where the same
+        run without these rows was at 2.87e-03.
+
+        `chain` (default) bounds |L(k+1) - L(k)| instead, so every row stays inside one
+        interval and the banded structure survives. The cost is that the drift the audit
+        measures can accumulate to (n_knots - 1) * box in the worst case -- 49 * box -- so the
+        box has to be set that much tighter. At the 1e-4 default that worst case is 4.9e-3,
+        above the audit's 1e-3 bound, so `chain` wants ~1e-5. The accumulation is a worst case
+        that requires every interval to drift the same direction; measure, do not assume it.
+        """
+        ph = PHASES[FLIGHT]
+
+        # |L_x| and |L_z| <= lateral at every flight knot. See AMOM_LATERAL.
+        for k in range(ph.n_knots):
+            mom = _Momentum(self.plant, self.plant_ad)
+
+            def lat(z, mom=mom):
+                return mom.l(z[XQ], z[XV])[[0, 2]]
+
+            self.prog.AddConstraint(lat, [-lateral] * 2, [lateral] * 2,
+                                    self.state(FLIGHT, k), description=f"amom_lat_{k}")
+
+        pairs = ([(0, k) for k in range(1, ph.n_knots)] if mode == "anchor"
+                 else [(k, k + 1) for k in range(ph.n_knots - 1)])
+        for a, b in pairs:
+            mom = _Momentum(self.plant, self.plant_ad)
+
+            def d(z, mom=mom):
+                x, y = z[:NX], z[NX:]
+                return mom.l(y[XQ], y[XV]) - mom.l(x[XQ], x[XV])
+
+            self.prog.AddConstraint(
+                d, -box * np.ones(3), box * np.ones(3),
+                np.concatenate([self.state(FLIGHT, a), self.state(FLIGHT, b)]),
+                description=f"amom_{a}_{b}")
+
     def _scale(self):
         for p, ph in enumerate(PHASES):
             if not ph.contacts:
@@ -616,8 +723,9 @@ class BackflipProgram:
         loop then begins 300x worse than the point it was handed. None of these four terms is
         needed for a valid trajectory (the tuck is guaranteed by the hard FLIGHT_TUCK window,
         not by w_tuck); they buy smoothness and effort for the RL stage that consumes this.
-        The symmetry term is the one the audit actually requires, so it is deliberately
-        outside the scaling and survives at scale=0.
+        There is NO symmetry term here, despite what this docstring said until 2026-09-06:
+        the four above are all of it, so `scale=0` leaves the objective identically flat --
+        which is the condition --proximal exists to fix, not a symmetry-only pass.
         """
         w_torque, w_rate = scale * w_torque, scale * w_rate
         w_time, w_tuck = scale * w_time, scale * w_tuck

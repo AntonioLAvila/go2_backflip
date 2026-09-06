@@ -1,27 +1,25 @@
 {
-  "source_checkpoint": "traj_opt/out/checkpoints_backflip_sf98/best.npy",
-  "commit": "ae266dc791a8bc0f31c2f972228fd50f6c9f48ec",
+  "source_checkpoint": "traj_opt/out/cand/t3_b0.npy",
+  "commit": "2423f46b0a8ec040aca8290f00590911e70575b9",
   "flight_knots": 50,
-  "max_violation": 0.137501,
-  "checks_passed": 9,
-  "checks_failed": 2,
-  "worst_overrun": 1.9748,
-  "failed": [
-    "flight angular momentum conserved",
-    "collocation matches a tight integrator"
-  ],
+  "max_violation": 0.579661,
+  "flight_amom": 1e-06,
+  "checks_passed": 11,
+  "checks_failed": 0,
+  "worst_overrun": 0.9835,
+  "failed": [],
   "margins": {
-    "quaternion stays unit without being pinned": 0.4347,
-    "net rotation is one full backflip": 0.004,
-    "flight CoM is ballistic": 0.0071,
-    "flight angular momentum conserved": 1.9748,
-    "contact forces inside the friction cone": 0.6285,
+    "quaternion stays unit without being pinned": 0.0182,
+    "net rotation is one full backflip": 0.0,
+    "flight CoM is ballistic": 0.0027,
+    "flight angular momentum conserved": 0.9835,
+    "contact forces inside the friction cone": 0.0,
     "torques inside the enforced torque-speed halfplanes": 0.0,
-    "no geometry below the floor": 0.0328,
-    "non-foot geometry keeps its clearance margin": 0.6443,
-    "sagittal symmetry holds without being pinned": 0.2519,
-    "flight is genuinely tucked": 0.9235,
-    "collocation matches a tight integrator": 1.2593
+    "no geometry below the floor": 0.0147,
+    "non-foot geometry keeps its clearance margin": 0.105,
+    "sagittal symmetry holds without being pinned": 0.1,
+    "flight is genuinely tucked": 0.8847,
+    "collocation matches a tight integrator": 0.7097
   },
-  "note": "Solved under the 2% actuator safety factor (hip/thigh 23.226, calf 44.100 N.m). --force because the manifest it is compared against was measured under the OLD full limits and is not a like-for-like baseline: re-audited under the current limits the outgoing trajectory is 9/11 at 1134563x (1.13 N.m of torque overshoot against a 1e-6 bound), against this one's 9/11 at 1.97x."
+  "note": "First 11/11 in the project's history. nlp_scaling_max_gradient=1 (IPOPT's default scaling was putting every burst into restoration on iteration 2) plus the new --flight-amom, which asserts the angular-momentum invariant the true dynamics conserve exactly. Better than the outgoing trajectory on every audit check AND on the 500 Hz tape: torque overshoot +0.79 N.m on 0.44% of samples against +2.33 on 2.60%, tape momentum peak-to-peak 1.34e-3 against 3.39e-3, tuck I_yy 0.487 against 0.509. Hardware clearance 0.479 N.m against 0.481, i.e. unchanged."
 }

@@ -25,6 +25,7 @@ the program, purely for readable grouping -- this changes no actual constraint.
 from __future__ import annotations
 
 import inspect
+import argparse
 import sys
 from collections import defaultdict
 
@@ -52,6 +53,11 @@ def _wrap(orig):
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--flight-amom", type=float, default=None, metavar="W",
+                    help="build the program with the flight angular-momentum box enabled, "
+                         "to check the rows it adds do not break LICQ")
+    args = ap.parse_args()
     MathematicalProgram.AddBoundingBoxConstraint = _wrap(MathematicalProgram.AddBoundingBoxConstraint)
     MathematicalProgram.AddLinearConstraint = _wrap(MathematicalProgram.AddLinearConstraint)
 
@@ -59,7 +65,7 @@ def main() -> int:
     from guess import Guess
     from solve_backflip import set_guess
 
-    bp = BackflipProgram()
+    bp = BackflipProgram(amom=args.flight_amom)
     print(f"program: {bp.prog.num_vars()} vars, {len(bp.prog.GetAllConstraints())} constraints")
 
     g = Guess(bp.plant)
