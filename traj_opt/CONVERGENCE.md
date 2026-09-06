@@ -817,3 +817,35 @@ So Part II is not blocked on something fundamental about direct collocation, the
 or the quaternion. It is blocked on ten identifiable rows. `kkt_check` now reports the
 row-normalised null space's energy by call site and lists the individual rows carrying it,
 which is what names them.
+
+## M20 — the ten rows, named, and the KKT system made full rank
+
+`kkt_check`'s row-normalised null-space listing named them:
+
+| rows | call site | why it is redundant |
+|---|---|---|
+| **8** | `_add_contact` friction cone | at a **release** knot `lambda_z` is pinned to 0, and IPOPT eliminates a fixed variable — so `lambda_x <= mu*lambda_z` and `-lambda_x <= mu*lambda_z` collapse to `+lambda_x <= 0` and `-lambda_x <= 0`, exact negatives of each other, both active |
+| 2 | `_add_symmetry` lambda_x mirror | same knots: `0 == 0` |
+| 2 | `_add_symmetry` `v[1] <= 0` box | phase 0 knot 0 and the final knot, where `_add_boundary` pins the whole of `v` to zero |
+| ~1 | `_add_body_clearance` at load knot 0 | `eq(x0[XQ], q0)` pins the configuration, so the clearance value is determined |
+
+Half of the entire deficiency was the friction cone at four release knots. The fix is to state
+what those rows mean — `lambda_x = 0`, as a fixed variable IPOPT eliminates — rather than as
+two mutually dependent inequalities.
+
+    formulation                          active   raw nullity   scaled nullity   scaled cond
+    original (TIGHT boxes, hard amom)      180        192            10            1.22e+16
+    + redundancy removal + penalties        14         35            10            1.22e+16
+    + release-knot lambda_x pin              4         27             2            7.54e+15
+    + body clearance de-duplicated           2         25          **0**        **1.41e+09**
+
+**The KKT system IPOPT is handed is now full rank and well conditioned**, from 1.22e16 — past
+`1/eps`, i.e. numerically singular — to 1.41e9. Every step of that was measured, and the
+shipped trajectory still audits 11/11 under every one of these formulations, since none of
+them changed a constraint that was doing work.
+
+| # | hypothesis | change | measured | verdict |
+|---|---|---|---|---|
+| K9 | The friction cone is exactly dependent at release knots | pin `lambda_x = 0` there | scaled nullity 10 -> 2 | `WIN` |
+| K10 | The last two are boundary/clearance duplicates | `_position_implied` on body clearance | scaled nullity 2 -> **0**, cond -> 1.41e9 | `WIN` |
+| K11 | A full-rank, well-conditioned KKT system converges | runs `g1`-`g5` | — | `RUN` |

@@ -430,7 +430,14 @@ class BackflipProgram:
                 # internal squeeze reacted by the hips -- a null space, not a mechanism.
                 self.prog.AddBoundingBoxConstraint(0.0, 0.0, lam[:, 1])
                 self.prog.AddBoundingBoxConstraint(0.0, LAMBDA_MAX, lam[:, 2])
+                released = self._released(p, ph) if k == ph.n_knots - 1 else set()
                 for i in range(nc):
+                    if i in released:
+                        # lambda_z is pinned to 0 here, so the cone says exactly lambda_x == 0.
+                        # Pin it instead of stating it as two mutually dependent rows -- see
+                        # _released.
+                        self.prog.AddBoundingBoxConstraint(0.0, 0.0, lam[i, 0])
+                        continue
                     self.prog.AddLinearConstraint(lam[i, 0] <= K.MU_TO * lam[i, 2])
                     self.prog.AddLinearConstraint(-lam[i, 0] <= K.MU_TO * lam[i, 2])
 
@@ -440,6 +447,25 @@ class BackflipProgram:
                     if foot not in PHASES[p + 1].contacts:
                         self.prog.AddBoundingBoxConstraint(
                             0.0, 0.0, self.lam[p][ph.n_knots - 1][i, 2])
+
+    @staticmethod
+    def _released(p, ph):
+        """Indices of this phase's contacts whose lambda_z is pinned to 0 at its final knot.
+
+        Those are the feet that swing in the next phase; _add_contact pins their normal force
+        to zero so the load is released smoothly. IPOPT eliminates a variable whose bounding
+        box has lb == ub, so at those knots lambda_z is GONE from the KKT system -- and the two
+        friction-cone rows, which read lambda_x <= mu*lambda_z and -lambda_x <= mu*lambda_z,
+        collapse to +lambda_x <= 0 and -lambda_x <= 0. Exact negatives of each other, both
+        active, and together carrying HALF the row-normalised rank deficiency of the whole
+        program (energy 5.0 of 10, measured by kkt_check.py).
+
+        The fix is to say what those rows actually mean: lambda_x = 0, as a fixed variable,
+        which IPOPT eliminates instead of carrying as two dependent rows.
+        """
+        if p + 1 >= len(PHASES):
+            return set()
+        return {i for i, f in enumerate(ph.contacts) if f not in PHASES[p + 1].contacts}
 
     @staticmethod
     def _noslip_implied(p, ph):
@@ -555,7 +581,11 @@ class BackflipProgram:
             for k in range(ph.n_knots):
                 x, u = self.state(p, k), self.u[p][k]
                 q, v = x[XQ], x[XV]
-                self.prog.AddBoundingBoxConstraint(-WY_MAX, 0.0, v[1])
+                # Not where _add_boundary already pins the whole of v: the trajectory starts
+                # and ends at rest, so v[1] == 0 exactly, and this box's upper bound is then
+                # an active inequality duplicating that equality.
+                if not ((p == 0 and k == 0) or (p == len(PHASES) - 1 and k == ph.n_knots - 1)):
+                    self.prog.AddBoundingBoxConstraint(-WY_MAX, 0.0, v[1])
                 # Base y is never implied by a boundary condition -- _add_boundary pins the
                 # final base X, not Y -- so it stays even where the rest is dropped.
                 zeroed = [q[5]] if k in skip else [q[1], q[3], q[5]]
@@ -574,7 +604,10 @@ class BackflipProgram:
                             self.prog.AddLinearConstraint(diff <= box)
                             pen.append(diff)
                         self.prog.AddLinearConstraint(u[a + d] == u[b + d])
+                rel = self._released(p, ph) if k == ph.n_knots - 1 else set()
                 for i, j in self._mirror_contact_pairs(ph):
+                    if i in rel and j in rel:
+                        continue          # both sides pinned to zero: the row reads 0 == 0
                     self.prog.AddLinearConstraint(self.lam[p][k][i, 0] == self.lam[p][k][j, 0])
                     self.prog.AddLinearConstraint(self.lam[p][k][i, 2] == self.lam[p][k][j, 2])
 
@@ -658,7 +691,10 @@ class BackflipProgram:
         """
         lb = _Floor(self.plant, self.plant_ad).margin
         for p, ph in enumerate(PHASES):
+            implied = self._position_implied(p, ph)
             for k in range(ph.n_knots):
+                if k in implied:
+                    continue      # q is pinned or stitched here; the row is a duplicate
                 floor = _Floor(self.plant, self.plant_ad)
                 self.prog.AddConstraint(
                     floor.slack, lb, np.full(lb.size, np.inf), self.state(p, k)[XQ],
