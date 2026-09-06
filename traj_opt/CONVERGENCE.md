@@ -294,3 +294,36 @@ the message cannot be misread the same way again. `nullity_check` still reports 
 | # | hypothesis | change | predicted | measured | verdict |
 |---|---|---|---|---|---|
 | H12 | Bounding L_y alone is enough, since symmetry pins L_x and L_z | `_add_flight_momentum`, scalar | AM check passes | L_y 1.98e-3 -> 8.15e-5, **check still fails at 1.64e-3 on L_x** | `LOSS` — now vector-valued |
+
+---
+
+## Where the campaign stands (2026-09-06, mid-run)
+
+Best point so far: **`n2` burst 0 — 10/11, worst 1.10x**, from `nlp_scaling_max_gradient=1`
+plus the three-component `--flight-amom 1e-5`.
+
+| check | shipped | `e2` b1 | `n2` b0 |
+|---|---|---|---|
+| flight angular momentum | FAIL 1.98e-3 | FAIL 1.50e-3 | **PASS 9.55e-4** |
+| collocation vs integrator | FAIL 6.30e-3 | **PASS 3.29e-3** | FAIL 5.50e-3 |
+| audit | 9/11 @ 1.97x | 10/11 @ 1.50x | **10/11 @ 1.10x** |
+
+The momentum check is solved — 9.55e-4 with all three axes in hand (9.5e-4 / 4.3e-4 / 7.0e-4).
+The whole campaign now rests on one number: **flight integration drift, 5.50e-3 against a
+5e-3 bound.** That is 10% away.
+
+Two levers remain for it, in order of preference:
+
+1. **More search.** `e2` reached 3.29e-3 on this check *without* the momentum rows, so the
+   formulation demonstrably supports it; the momentum rows cost some of that back
+   (3.29e-3 -> 5.50e-3) and the chains have plenty of bursts left.
+2. **Mesh refinement.** M7 argues it is now live where it was not at viol 0.14. Held in
+   reserve, because it requires editing `schedule.py`'s knot count, which makes the working
+   tree incompatible with every 50-knot checkpoint currently being searched.
+
+### Honest note on the tape
+
+`n2` passes the audit's momentum check at the knots and **fails it on the tape**
+(peak-to-peak 1.88e-3 against 1e-3), and its torque rings +6.68 N.m over the design envelope
+against the shipped trajectory's +2.33. It is better than shipped on tape momentum
+(1.88e-3 vs 3.39e-3) and worse on tape torque. Whatever ships has to be reported on both.
