@@ -911,3 +911,42 @@ declaring the constraints unsatisfiable.
 So the LICQ repair did change SNOPT's failure mode (13 -> 43) without making it succeed. On
 this problem SNOPT is also 5-15x slower per solve than IPOPT — 2267 s and 3336 s for a single
 pass — which makes it a poor search vehicle regardless.
+
+## M23 — the small-problem test, and what it can and cannot say
+
+The idea was to separate "this problem is too big/ill-conditioned to certify" from "this
+formulation cannot be certified at all" by shrinking it. Cold starts, `--iters 4000`:
+
+| arm | flight knots | vars | min inf_pr | min inf_du |
+|---|---|---|---|---|
+| `t14` | 14 | 4118 | 12.1 | 10.0 |
+| `t26` | 26 | 4934 | 5.02 | 20.7 |
+| `t50` | 50 | 6566 | 192 | 40.5 |
+| `o14` | 14, original formulation | 4118 | 5.13 | 40.0 |
+| `o26` | 26, original formulation | 4934 | 8.88 | 32.8 |
+
+Nothing converges at any size in either formulation — but **nothing reaches feasibility
+either**, `inf_pr` bottoming at 5 to 192. So as run this does not isolate stationarity: the
+iterates never got near the feasible manifold, and dual infeasibility at an infeasible point
+says nothing about whether a feasible one could be certified.
+
+It is still a real result, and a useful one: **neither solver can reach feasibility from
+`guess.py` at any mesh size.** SNOPT's cold `info=13` at viol 1339 is the same statement. That
+is why this project has always depended on the restart-from-checkpoint chain rather than on a
+clean solve, and it is worth knowing explicitly rather than as folklore.
+
+Trying to fix the test by warm-starting 26 knots from the shipped 50-knot solution does not
+work either: coarsening 50 -> 26 is not a subset grid, and the export starts at **inf_pr
+1.28e+03**. That is M12's finding in the other direction — a resampled mesh that does not
+retain the source breakpoints lands far off the manifold.
+
+A clean small-problem test therefore needs its own restart search at 26 knots to produce a
+feasible point first (`w26r`). Until that lands, the honest summary of Part II's evidence is:
+
+* At 50 knots, from a genuinely feasible point (viol 0.58, audit 11/11), with the KKT Jacobian
+  at **nullity 0 and cond 1.41e9**, IPOPT's dual infeasibility floors at **3.12** against a
+  `tol` of 1e-4, across ~25 arms spanning six objective forms, three barrier strategies, three
+  scalings, two `bound_push` decades and four L-BFGS settings.
+* SNOPT fails differently (`info=43`, "cannot satisfy the general constraints") and no better,
+  moving *away* from a nearly feasible start.
+* No cold start, at any mesh size, in either formulation, reaches feasibility at all.
