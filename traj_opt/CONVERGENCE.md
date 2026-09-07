@@ -886,3 +886,5 @@ The remaining candidates, in the order they are worth testing:
 2. **The active set changes during the solve.** `kkt_check` measures one point. Nothing yet
    measures whether the conditioning holds along the path.
 3. **These iterates are not near a stationary point** of any objective posed so far.
+
+| K13 | The L-BFGS history of 6 is the blocker, once restoration no longer masks it | `limited_memory_max_history` 50 / 200, `update_type=sr1` | all three reach min inf_du **15.9 at iteration 1** — identical to baseline, no improvement at any history | `DEAD` (re-tested in the right regime, same verdict) |
