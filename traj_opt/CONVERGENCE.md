@@ -888,3 +888,26 @@ The remaining candidates, in the order they are worth testing:
 3. **These iterates are not near a stationary point** of any objective posed so far.
 
 | K13 | The L-BFGS history of 6 is the blocker, once restoration no longer masks it | `limited_memory_max_history` 50 / 200, `update_type=sr1` | all three reach min inf_du **15.9 at iteration 1** — identical to baseline, no improvement at any history | `DEAD` (re-tested in the right regime, same verdict) |
+
+## M22 — SNOPT, re-tested for a specific reason, and it does not succeed either
+
+Worth doing rather than trusting `CLAUDE.md`'s "SNOPT has never once returned success here",
+because of *how* it used to fail. STATUS records the symptom as a silent, wrong `info=13`
+("infeasible") on points that were feasible, and attributes it to LICQ violations — which is
+exactly what K6/K7/K9/K10 removed. SNOPT is also SQP, so IPOPT's barrier conditioning does not
+apply to it at all, and it takes its multipliers from a QP subproblem that is well posed
+precisely when LICQ holds. All three reasons said this was the best untried lever.
+
+| arm | start | objective | result |
+|---|---|---|---|
+| `s2` | cold (guess.py) | costed | `info=13`, viol **1338.7**, 2267 s |
+| `s3` | shipped 11/11 point | penalties only | `info=43` "cannot satisfy the general constraints", viol 0.58 -> **7.04**, 3336 s |
+
+Neither is the spurious failure. `s2`'s `info=13` comes with a genuine viol of 1339 — SNOPT
+simply cannot reach feasibility from the analytic guess, which is a real result about the
+guess, not a false report. And `s3` starts 0.58-feasible and moves *away*, to 7.04, before
+declaring the constraints unsatisfiable.
+
+So the LICQ repair did change SNOPT's failure mode (13 -> 43) without making it succeed. On
+this problem SNOPT is also 5-15x slower per solve than IPOPT — 2267 s and 3336 s for a single
+pass — which makes it a poor search vehicle regardless.
