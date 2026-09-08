@@ -83,17 +83,26 @@ viol 1339; warm `info=43` "cannot satisfy the general constraints" at viol 7.04;
 either formulation, either solver). That is why this project has always needed the
 restart-from-checkpoint chain.
 
-## Running overnight
+## Overnight result — `w26r` finished, and it answers decision 2
 
-One job: **`w26r`** (tmux session), a 26-knot restart search trying to produce a *feasible*
-small-problem point. Everything else was stopped. Check it first:
+The 26-knot restart search ran all 12 bursts and stopped. Nothing is running now.
 
-    tmux ls; grep -E "audit=|success=" traj_opt/out/solve_w26r.log | tail -5
+    best: viol 0.9278, audit 6/11, worst 92.31x
+    min inf_du = 1.45 at iteration 324, over 5116 normal iterations
 
-It matters because the small-problem test is currently **inconclusive**: shrinking to 14/26
-knots showed no convergence, but also never reached feasibility (`inf_pr` 5-192), so it does
-not isolate stationarity. `w26r` is the attempt to fix that. Coarsening the 50-knot solution to
-26 does *not* work (starts at `inf_pr` 1.28e+03) — the grid is not a subset.
+Two readings, and they point opposite ways:
+
+* **Size does matter.** 4934 variables reach dual infeasibility **1.45** where 6566 variables
+  floor at **3.12** — a factor of ~2 from a 25% smaller problem, at a comparable distance from
+  the feasible manifold (viol 0.93 against 0.58). That is the first evidence in the campaign
+  that the stationarity residual is scale-dependent rather than structural.
+* **It is nowhere near enough.** `tol` is 1e-4. A 25% size cut bought half an order; closing
+  four more would need a problem far smaller than anything that could represent this manoeuvre.
+  And the 26-knot trajectory audits **6/11** — it is not a usable trajectory, so this is a
+  statement about the solver's arithmetic, not a route to a shippable result.
+
+So decision 2 is answered: **"too big" is real but not the whole story, and shrinking is not a
+path.** Treat the small-problem line of attack as closed.
 
 ## Decisions for tomorrow
 
