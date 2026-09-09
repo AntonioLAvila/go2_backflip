@@ -375,6 +375,16 @@ def main() -> int:
                           "high-frequency content the first-order hold has to represent -- "
                           "the suspected source of the between-knot ringing that makes a low "
                           "max_violation audit badly")
+    ap.add_argument("--w-vrate", type=float, default=0.0, metavar="W",
+                     help="add_cost's joint-velocity-rate weight (default 0, i.e. off). "
+                          "w_rate's structure but on v instead of u: CONVERGENCE.md's M11 found "
+                          "the tape's torque-envelope ringing is entirely the SPEED-dependent "
+                          "halfplane, driven by qd from the cubic STATE spline -- not by u's "
+                          "first-order hold, which is what w_rate smooths and why it measured "
+                          "no effect. Also the natural lever on the other open audit check: "
+                          "Hermite-Simpson's truncation error scales with the state "
+                          "trajectory's higher derivatives, so a smoother v is a genuinely "
+                          "smaller integration-drift residual at a fixed mesh")
     ap.add_argument("--proximal", type=float, default=0.0, metavar="W",
                      help="add W*||x - seed||^2 (per-variable normalised) to the objective, "
                           "with the seed from --start-checkpoint. Regularises the degenerate "
@@ -470,6 +480,8 @@ def main() -> int:
         set_guess(bp, g.build(), g.footholds())
 
     cost_kw = {} if args.w_rate is None else {"w_rate": args.w_rate}
+    if args.w_vrate:
+        cost_kw["w_vrate"] = args.w_vrate
     make_opts = snopt_options if args.solver == "snopt" else ipopt_options
     if args.no_prepass:
         if not args.start_checkpoint:

@@ -950,3 +950,85 @@ feasible point first (`w26r`). Until that lands, the honest summary of Part II's
 * SNOPT fails differently (`info=43`, "cannot satisfy the general constraints") and no better,
   moving *away* from a nearly feasible start.
 * No cold start, at any mesh size, in either formulation, reaches feasibility at all.
+
+---
+
+## M24 — strict complementarity, checked directly: it holds, and isn't the blocker
+
+`kkt_check.py` only ever checked rank. Extended it to solve for the KKT multipliers directly —
+`lstsq(R^T, -g)` over the same active-set Jacobian the file already builds, with `g` the
+objective gradient from `bp.add_cost()` plus whatever penalty terms are on — giving a
+stationarity residual comparable to IPOPT's own `inf_du`, plus a per-row SIGN check (an active
+inequality's multiplier must be >=0 active-at-upper, <=0 active-at-lower; a wrong sign means the
+point is not a KKT candidate along that direction at all, a stronger finding than "weakly
+active"). Solved against `R` (row-normalised), not raw `M`, for the same reason the file already
+prefers `R` for rank: raw nullity mixes genuine degeneracy with rows that are merely badly
+scaled relative to each other (M2).
+
+At the K9/K10 full-rank formulation (`--flight-amom 0 --amom-penalty 1e3 --sym-box 1e-2
+--sym-penalty 10`) the fit is **exact and unique** — `lstsq rank = 5756 of 5756` rows, i.e.
+`R^T` has full column rank on the active set. Both of the formulation's two remaining active
+inequalities (`floor_launch_9[26]`, `pin_launch_11[2]`) have healthy, correctly-signed
+multipliers; zero weakly-active, zero wrong-sign. **Strict complementarity holds.** The residual
+that remains (0.397, inf-norm 0.0399) is carried entirely by the equality rows (collocation
+defects, boundary, stitching), which have no sign requirement at all — there is no inequality
+left to be degenerate.
+
+| # | hypothesis | change | predicted | measured | verdict |
+|---|---|---|---|---|---|
+| K14 | Weakly-active inequalities (strict-complementarity failure) explain the dual-infeasibility floor even at nullity 0 | `kkt_check.py` least-squares multiplier extension | some active rows near-zero multiplier | 2/2 active inequalities healthy, correctly signed, `lstsq` exactly determined | `LOSS` — rules out complementarity as the mechanism. Sharpens M21: this is not a degenerate-KKT-system problem any more, it is a well-posed one whose exact answer is "not a critical point of this objective" |
+
+At the ORIGINAL hard-box formulation (default flags) the same tool correctly flags itself as
+untrustworthy: row-normalised nullity 22, multiplier magnitudes 1e2–1e5 (compare O(1–10) in the
+full-rank case above), 87 of 168 active inequalities wrong-signed. Not a finding about that
+formulation's physics — exactly the garbage a non-unique least-squares fit over a degenerate
+system should produce, and useful confirmation that the tool knows when to distrust itself.
+
+## M25 — a velocity-smoothness cost term, and three bounded verification bursts that all lose to the seed
+
+RESUME.md's own top recommendation was "change the objective": M6/M9 already showed a strictly
+better OPTIMIZER on the existing four-term cost (torque^2, rate^2, time, tuck) finds a worse
+TRAJECTORY, so the shipped point is not that objective's minimizer, and nothing in the four
+terms penalizes the specific thing that makes it worse. `program.py:add_cost` gained a fifth
+term, `w_vrate` (default 0, opt-in): `w_rate`'s exact structure — quadratic penalty on
+consecutive-knot differences, scaled by `1/speed_limit^2` — applied to joint VELOCITY instead of
+torque. Two independent reasons this is a specific, motivated term rather than a guess:
+
+* M11 pinned the tape's torque-envelope ringing to the SPEED-dependent halfplane term alone,
+  whose `qd` comes from the cubic STATE spline — not from `u`'s first-order hold, which is what
+  `w_rate` smooths and why sweeping it 0.1–12 measured no effect (three cancelled arms).
+* The other open audit check, collocation vs. a tight integrator, is a truncation-error
+  measurement, and Hermite-Simpson's local error scales with the state trajectory's higher
+  derivatives — a smoother `v` is a genuinely smaller residual at a FIXED mesh, not a disguised
+  one.
+
+Three bounded verification chains (5 restarts x 300 iterations, `--start-checkpoint
+traj_opt/reference/backflip.npy --no-prepass`, so all three start bit-exact on the shipped
+11/11 point, viol 0.5797), run 2026-09-08:
+
+| run | flags | burst 0 | burst 1 | burst 2 | burst 3 | burst 4 | best over the chain |
+|---|---|---|---|---|---|---|---|
+| `vopt_baseline` | (none — fresh reference chain) | 2.32 | 449.8 | 18.5 | 56.1 | 12.7 | **seed, 0.5797** |
+| `vopt_vrate` | `--w-vrate 0.1` | 1.04 | 21.7 | 22.6 | 43.1 | 681.2 (6/11) | **seed, 0.5797** |
+| `vopt_repaired` | `--flight-amom 0 --amom-penalty 1e3 --sym-box 1e-2 --sym-penalty 10 --w-vrate 0.1` | 10.7 | 3.54 | 53.1 | 26.3 | 41.2 (5/11, dual inf 1.4e13) | **seed, 0.5797** |
+
+Every column is `max_violation` at that burst's raw result. **None of the fifteen bursts across
+three configurations beat the seed.** Seeding the restart loop on the best trajectory this
+project has ever produced and giving it ~55 minutes more IPOPT time (5 bursts x ~11 min each)
+made every single burst worse, in all three formulations — including the two carrying the new
+cost term added this session specifically to fix that. `vopt_repaired`'s last burst is also the
+single worst-conditioned point this campaign has recorded, unscaled dual infeasibility **1.4e13**
+(four orders past anything in M18's table); likely `sym_penalty=10`/`amom_penalty=1e3` (carried
+over unchanged from the K6/K7 experiments) interacting badly with the new `w_vrate` term, since
+the three weights were never jointly retuned — not evidence against the term itself.
+
+One suggestive, not conclusive, signal: `vrate`'s burst 0 (1.04) was closer to the seed than
+either `baseline`'s (2.32) or `repaired`'s (10.7), consistent with the new term pulling in the
+right direction even though it wasn't enough to win outright at this budget.
+
+| # | hypothesis | change | predicted | measured | verdict |
+|---|---|---|---|---|---|
+| K15 | A velocity-smoothness cost term makes a KKT point of the objective a good trajectory | `--w-vrate 0.1`, 5x300-iter chained bursts, hard-box and full-rank formulations both | search finds a point at or better than the seed | seed never beaten in either formulation in 5 bursts; weak positive signal on burst 0 only | `INCONCLUSIVE` — not ruled out, not confirmed. See RESUME.md for why the chained-burst search is the wrong instrument to settle this, and what to run instead |
+
+Both things this session actually established — K14 (complementarity holds, full stop) and the
+`CLAUDE.md` impact-phase documentation error — stand regardless of K15's inconclusive result.

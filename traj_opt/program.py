@@ -846,22 +846,41 @@ class BackflipProgram:
             self.prog.SetVariableScaling(var, LAMBDA_SCALE * 0.1)
 
     # --- cost ----------------------------------------------------------------
-    def add_cost(self, w_torque=1.0, w_rate=0.1, w_time=1.0, w_tuck=0.5, scale=1.0):
+    def add_cost(self, w_torque=1.0, w_rate=0.1, w_time=1.0, w_tuck=0.5, w_vrate=0.0,
+                 scale=1.0):
         """Performance costs, scaled by `scale`; the symmetry cost is NOT scaled.
 
         `scale` exists because at full weight this pass is not affordable. Measured: the
         feasibility pass reaches viol 0.0025 and the costed pass that starts from it ends at
         0.7349 with cost 11.5 -- it walks straight off the feasible manifold, and the restart
-        loop then begins 300x worse than the point it was handed. None of these four terms is
+        loop then begins 300x worse than the point it was handed. None of these five terms is
         needed for a valid trajectory (the tuck is guaranteed by the hard FLIGHT_TUCK window,
         not by w_tuck); they buy smoothness and effort for the RL stage that consumes this.
         There is NO symmetry term here, despite what this docstring said until 2026-09-06:
-        the four above are all of it, so `scale=0` leaves the objective identically flat --
+        the five above are all of it, so `scale=0` leaves the objective identically flat --
         which is the condition --proximal exists to fix, not a symmetry-only pass.
+
+        `w_vrate` (default off) is new: a quadratic penalty on joint-velocity DIFFERENCES
+        between consecutive knots, `w_rate`'s exact structure but on `v` instead of `u`. It
+        exists because `w_rate` cannot be what fixes the tape ringing CONVERGENCE.md's M11
+        diagnosed: `check_tape.py`'s torque-envelope overshoot is entirely the SPEED-dependent
+        halfplane term, and the speed there comes from the cubic STATE spline between knots,
+        not from the input's first-order hold -- `w_rate` smooths tau, which M11 measured is
+        not what rings (three `--w-rate` arms moved nothing). It should also help the OTHER
+        remaining audit failure, "collocation vs a tight integrator": Hermite-Simpson's local
+        truncation error scales with the state trajectory's higher derivatives, so a smoother
+        `v` between knots is a smaller true residual at a FIXED mesh, not just a smaller-looking
+        one. Point of the whole exercise (see RESUME.md's "change the objective"): the current
+        four terms have a minimizer that audits WORSE than the trajectory the restart chain
+        interrupts on its way there (STATUS 2026-09-06 M6/M9) -- torque effort alone rewards
+        exactly the high-frequency, low-net-displacement wiggling that produces that ringing,
+        and nothing in the objective before this penalized it.
         """
         w_torque, w_rate = scale * w_torque, scale * w_rate
         w_time, w_tuck = scale * w_time, scale * w_tuck
+        w_vrate = scale * w_vrate
         inv = 1.0 / K.torque_limits() ** 2
+        inv_v = 1.0 / K.speed_limits() ** 2
         for p, ph in enumerate(PHASES):
             # Per-interval steps now, so the running cost has to integrate against the actual
             # mesh rather than one scalar h: weight each knot by half of each interval it
@@ -877,6 +896,11 @@ class BackflipProgram:
                        for k in range(ph.n_knots - 1) for j in range(NU))
             self.prog.AddCost(w_rate * rate)
             self.prog.AddCost(w_time * sum(hs))
+            if w_vrate:
+                qd = lambda k, j: self.state(p, k)[XV][6 + j]     # noqa: E731
+                vrate = sum((qd(k + 1, j) - qd(k, j)) ** 2 * float(inv_v[j])
+                           for k in range(ph.n_knots - 1) for j in range(NU))
+                self.prog.AddCost(w_vrate * vrate)
 
         # Pull the tucked knots toward TUCK_LEGS rather than letting them sit anywhere in the
         # window. The hard window guarantees the inertia; this makes the solver settle inside

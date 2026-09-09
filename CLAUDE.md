@@ -126,7 +126,7 @@ can't be a DirectCollocation input, but `applied_generalized_force` is vector-va
 already excludes gravity/damping (those are force elements inside `EvalTimeDerivatives`), so a
 per-knot constraint `port(k) == B@u_k + sum_i J_i(q_k)^T lambda_i_k` ties ordinary `u`/`lambda`
 decision variables to it. Phases are glued by state-continuity constraints, except the
-load→launch touchdown (`schedule.IMPACT`), which instead gets a full impulsive-contact equation
+flight→absorb touchdown (`schedule.IMPACT`), which instead gets a full impulsive-contact equation
 (mass matrix times velocity jump equals the sum of foot impulses, no-slip enforced post-impact).
 Sagittal symmetry (hip pins, left/right leg mirroring, `quat_x=quat_z=0`) is enforced hard,
 which is also what turns "one full backflip" into a single terminal equality: with those
