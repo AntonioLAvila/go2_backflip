@@ -47,29 +47,13 @@ ACTUATOR_NAMES = [n.replace("_joint", "") for n in JOINT_NAMES]
 # HARDWARE peaks, in N.m. These are the datasheet/MJCF numbers and must keep matching
 # go2.xml's actuator forcerange -- verify_parity Check A compares Drake's effort_limit against
 # MuJoCo's forcerange, and mj_divergence.py clips against these because that is what the real
-# actuator will do. Do NOT derate these; derate DESIGN_TORQUE below.
+# actuator will do. Do NOT derate these; the optimizer derates NOMINAL_TORQUE below.
 PEAK_TORQUE = {"hip": 23.7, "thigh": 23.7, "calf": 45.43}      # N.m
 MAX_SPEED = {"hip": 30.1, "thigh": 30.1, "calf": 15.7}         # rad/s
 
-# What the trajectory optimization is actually allowed to use: a factor of safety, so the
-# reference does not ride the actuator limit and the RL stage inherits margin instead of
-# having to discover it. The shipped 50-knot trajectory hit every limit exactly -- thigh
-# 23.70/23.70 and calf 45.43/45.43, both 100.0%, all three peaks inside launch -- which leaves
-# a tracking policy no torque authority precisely where the maneuver is hardest.
-#
-# The calf is derated from Unitree's ADVERTISED 45 N.m rather than the MJCF's 45.43, so the
-# margin is taken against the number the vendor stands behind.
-TORQUE_SF = 0.98
+# Unitree's advertised calf figure is 45 N.m; the MJCF carries 45.43. The optimizer derates
+# from the number the vendor stands behind (flip.Config.torque_sf * NOMINAL_TORQUE).
 NOMINAL_TORQUE = {"hip": 23.7, "thigh": 23.7, "calf": 45.0}
-DESIGN_TORQUE = {k: TORQUE_SF * v for k, v in NOMINAL_TORQUE.items()}
-
-# CORNER_SPEED_FRAC below is deliberately NOT recomputed from DESIGN_TORQUE. Lowering the
-# current limit would move the corner slightly to the RIGHT (1 - 23.226/55.2 = 0.579 for the
-# hip, 0.583 for the calf), so holding it at the 0.571 derived from the full 23.7 N.m ends the
-# flat region marginally early. That is the conservative direction, and it keeps one scalar
-# valid for both reductions instead of two that differ by 0.4 of a percentage point.
-
-KNEE_EXTRA_REDUCTION = PEAK_TORQUE["calf"] / PEAK_TORQUE["hip"]
 
 # Reflected rotor inertia, I_rotor * N^2. This is exactly the MJCF `armature` value and
 # exactly Drake's reflected inertia (Drake sets gear_ratio=1, rotor_inertia=armature).
@@ -77,28 +61,15 @@ KNEE_EXTRA_REDUCTION = PEAK_TORQUE["calf"] / PEAK_TORQUE["hip"]
 # `armature` attributes in go2.xml -- verify_parity Check A fails if they drift.
 ARMATURE = {"hip": 0.01, "thigh": 0.01, "calf": 0.02}
 
-GEAR_RATIO = {"hip": None, "thigh": None, "calf": None}
-ROTOR_INERTIA = {"hip": None, "thigh": None, "calf": None}
-CONTINUOUS_TORQUE = {"hip": None, "thigh": None, "calf": None} # thermal budget only
-
-DAMPING = 0.1 # best conservative guess, not measured TODO
-
 
 def joint_kind(name: str) -> str:
     """'FL_calf_joint' -> 'calf'."""
     return name.split("_")[1]
 
 
-def torque_limits() -> np.ndarray:
-    """DESIGN torque per actuator, in JOINT_NAMES order -- the limit the optimization and the
-    audit enforce, already carrying TORQUE_SF. Everything that asks "how hard may this
-    trajectory push" wants this. Use hardware_torque_limits() for "what can the motor do"."""
-    return np.array([DESIGN_TORQUE[joint_kind(n)] for n in JOINT_NAMES])
-
-
 def hardware_torque_limits() -> np.ndarray:
-    """Datasheet peak torque per actuator -- what the real actuator and the MJCF will allow,
-    with no factor of safety. Only for simulating the hardware, not for constraining a solve."""
+    """Datasheet peak torque per actuator -- what the real actuator and the MJCF allow, with no
+    factor of safety. The optimizer derates NOMINAL_TORQUE instead (flip.Config.torque_sf)."""
     return np.array([PEAK_TORQUE[joint_kind(n)] for n in JOINT_NAMES])
 
 
@@ -115,14 +86,15 @@ def speed_limits() -> np.ndarray:
 CORNER_SPEED_FRAC = 1.0 - 23.7 / 55.2  # 0.571
 
 
-def torque_speed_bound(qd: np.ndarray) -> np.ndarray:
-    """|tau| <= tau_peak, flat to CORNER_SPEED_FRAC*w_max, then linear to 0 at w_max."""
+def torque_speed_bound(qd: np.ndarray, peak: np.ndarray | None = None) -> np.ndarray:
+    """|tau| <= peak, flat to CORNER_SPEED_FRAC*w_max, then linear to 0 at w_max."""
+    peak = hardware_torque_limits() if peak is None else peak
     w_max = speed_limits()
     derate = (w_max - np.abs(qd)) / (w_max * (1.0 - CORNER_SPEED_FRAC))
-    return torque_limits() * np.clip(derate, 0.0, 1.0)
+    return peak * np.clip(derate, 0.0, 1.0)
 
 
-def torque_speed_halfplanes() -> tuple[np.ndarray, np.ndarray]:
+def torque_speed_halfplanes(peak: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     """(k, tau_stall) putting torque_speed_bound into a form an NLP can hold.
 
     abs() and clip() are non-smooth, so the bound above cannot be a constraint. The same
@@ -135,7 +107,8 @@ def torque_speed_halfplanes() -> tuple[np.ndarray, np.ndarray]:
     These leave regeneration -- tau opposing qd -- underated, which is the physical behaviour
     and the one place they intentionally differ from torque_speed_bound.
     """
-    tau_stall = torque_limits() / (1.0 - CORNER_SPEED_FRAC)
+    peak = hardware_torque_limits() if peak is None else peak
+    tau_stall = peak / (1.0 - CORNER_SPEED_FRAC)
     return tau_stall / speed_limits(), tau_stall
 
 
@@ -144,25 +117,15 @@ def torque_speed_halfplanes() -> tuple[np.ndarray, np.ndarray]:
 HOME_LEGS = np.array([0.0, 0.9, -1.8] * 4)
 TUCK_LEGS = np.array([0.0, 2.2, -2.7] * 4)
 
-HOME_BASE_HEIGHT = 0.27
-TUCK_BASE_HEIGHT = 0.30
-
-# HOME_BASE_HEIGHT is the keyframe value and sits well INTO the floor. This is the height that
-# rests HOME_LEGS on it, and it is what the trajectory optimization must start and end from.
-# Measured to the foot SPHERE, not to P_FOOT. The old P_FOOT-based value (0.2800479196045126)
-# is 8.3 mm too low -- it rests the sphere that far INTO the floor, because the calf is tilted
-# 51.6 deg at HOME (see R_FOOT above) -- so the trajectory used to start and end already
-# penetrating. Only valid together with program.py pinning the sphere rather than P_FOOT.
+# go2.xml's keyframe height (0.27) rests HOME_LEGS INTO the floor. This is the height that puts
+# the foot SPHERE on it -- measured to the sphere, not to P_FOOT, because the calf is tilted
+# 51.6 deg at HOME (see R_FOOT above). The trajectory starts and ends here.
 STAND_BASE_HEIGHT = 0.2883725003026
 
 
 def mj_qpos(legs: np.ndarray, height: float, quat_wxyz=(1.0, 0.0, 0.0, 0.0)) -> np.ndarray:
     """Full MuJoCo qpos: [x y z, qw qx qy qz, 12 joints]."""
     return np.concatenate([[0.0, 0.0, height], quat_wxyz, legs])
-
-
-HOME_QPOS_MJ = mj_qpos(HOME_LEGS, HOME_BASE_HEIGHT)
-TUCK_QPOS_MJ = mj_qpos(TUCK_LEGS, TUCK_BASE_HEIGHT)
 
 
 # --- Drake index layout ------------------------------------------------------
@@ -258,7 +221,8 @@ TUCK_COLLISION_PAIRS = [
 
 # Self-collision-free box in the sagittal tuck variables (thigh/calf, front/rear), with hips at
 # zero and the legs mirrored. Grown by tools/tuck_box.py from the region spanned by HOME_LEGS
-# and TUCK_LEGS, with 5 mm of clearance. Contains both poses, so it bounds the whole flip.
+# and TUCK_LEGS, with 5 mm of clearance. Contains both poses, so it bounds the whole flip. The
+# optimizer holds the flight-phase joints inside it (flip.py).
 TUCK_BOX = {
     "thigh_front": (-1.5708, 3.4907),
     "calf_front": (-2.7227, -1.685983),
@@ -277,8 +241,8 @@ TUCK_BOX = {
 # at every knot: `p_z(q) >= r`.
 #
 # All four legs share one entry per kind (asserted by the generator). The y column is carried
-# for completeness and is unused by the z constraint -- with quat_x = quat_z = 0 the base has
-# pitch only, so a body point's world z does not depend on its y. That same fact is why +-y
+# for completeness and is unused by the z constraint -- the optimizer's model is sagittal, so the
+# base has pitch only and a body point's world z does not depend on its y. That same fact is why +-y
 # mirror pairs collapse to a single witness point here.
 COLLISION_SPHERES = {
     "base": np.array([
@@ -306,17 +270,4 @@ COLLISION_SPHERES = {
         (+0.01893, +0.00000, -0.16947, 0.01100),
         (-0.00200, +0.00000, -0.21300, 0.02200),
     ]),
-}
-
-
-# The tuck the flip actually has to hold, as a hard window on the middle of the flight phase.
-# TUCK_BOX above only says "not self-colliding", which near-full extension satisfies, and
-# nothing else in the cost rewards folding up -- so the optimizer left the legs sprawled at
-# I_yy = 0.66 kg.m^2, WORSE than simply standing (0.48), and had to buy the resulting slow
-# rotation with a 0.57 m CoM rise. Holding this window instead puts I_yy at 0.45-0.46, which
-# is a 0.27 m rise for the same angular momentum -- the tuck is what makes the flip cheap.
-# Wide enough to leave the solver real freedom; TUCK_LEGS sits comfortably inside it.
-FLIGHT_TUCK = {
-    "thigh": (1.30, 2.90),
-    "calf": (-2.72, -2.00),
 }

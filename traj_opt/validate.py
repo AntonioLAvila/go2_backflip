@@ -48,8 +48,7 @@ class Check(NamedTuple):
 
 
 def _halfplane_over(tau, qd, peak):
-    stall = peak / (1.0 - K.CORNER_SPEED_FRAC)
-    k = stall / K.speed_limits()
+    k, stall = K.torque_speed_halfplanes(peak)
     return np.max([np.abs(tau) - peak, tau + k * qd - stall, -tau - k * qd - stall], axis=0).max()
 
 

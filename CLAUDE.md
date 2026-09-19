@@ -15,12 +15,12 @@ before assuming where things stand.
 
 **History you should know about.** Until 2026-09-18 the optimizer was a Drake
 `DirectCollocation` program on the full 18-DOF model with sagittal symmetry imposed by
-constraints. It never once returned solver success; three weeks of work on it (LICQ repairs,
-restart-from-checkpoint searches, a 16-option IPOPT screen) is archived, with its complete logs,
-in `legacy/drake_dircol/`. It is not maintained and its scripts are not expected to run from
-there. The lesson it paid for, and the reason the current formulation looks the way it does:
-**impose a symmetry by parametrisation, never by constraint** — every pin on a coordinate the
-dynamics already propagate is a rank-deficient row waiting to happen.
+constraints. It never once returned solver success. It was deleted on 2026-09-19; its code and
+three weeks of logs (LICQ repairs, restart-from-checkpoint searches, a 16-option IPOPT screen)
+are in git history before commit `30f0d0a` if ever needed. The lesson it paid for, and the
+reason the current formulation looks the way it does: **impose a symmetry by parametrisation,
+never by constraint** — every pin on a coordinate the dynamics already propagate is a
+rank-deficient row waiting to happen.
 
 ## Environment
 
@@ -97,8 +97,9 @@ CasADi expressions. Nothing is hand-derived: it reads MuJoCo's *compiled* `go2.x
 masses, inertias, armature, damping), assembles the Lagrangian of all 13 bodies symbolically,
 and lets CasADi differentiate. The mirrored hip-abduction coordinates are carried symbolically
 and evaluated at zero, which yields `hip()` — the torque needed to *hold* the hips at zero under
-load. That is a real limit a hand-written planar model would miss: the legacy reference ran its
-hips to 21.6 of 23.7 N·m (the shipped one peaks at 7.5). Conventions: `R_y(+theta)` tips the nose down so a backflip is `theta → -2π`; forces
+load. That is a real limit a hand-written planar model would miss: the old reference ran its
+hips to 21.6 of 23.7 N·m (the shipped one peaks at 7.5).
+Conventions: `R_y(+theta)` tips the nose down so a backflip is `theta → -2π`; forces
 are **per foot**, torques **per motor**, and the factor 2 for the mirrored pair is applied inside
 `sagittal.py` and nowhere else. `embed_qpos/qvel/ctrl` lift to MuJoCo's full state.
 
@@ -114,7 +115,7 @@ full rank:
   (`g̈ + 2αġ + α²(g − g0) = 0`). With the equations of motion that is a square nonsingular system
   for `(a, λ)`; the flow stays on the contact manifold because it starts there (HOME at rest;
   inherited; or the impact map's `J v⁺ = 0`). **Do not add position or velocity foot pins on
-  top** — they are implied by the defects and are exactly the LICQ failure that sank the legacy
+  top** — they are implied by the defects and are exactly the LICQ failure that sank the old
   formulation. The audit measures the resulting drift instead (tens of microns).
 * **Boundary conditions pin only as many things as the manifold has freedoms.** Terminal:
   `theta`, four leg angles, base velocity (3), base acceleration (3). Base height and joint rates
@@ -132,7 +133,7 @@ anything counted in nodes makes the optimum move with the mesh.
 
 IPOPT gets exact gradients, Jacobians and Hessians from CasADi (`expand=True`), which is why a
 crude piecewise-linear key-pose guess (`initial_guess`) converges in ~50 iterations where the
-L-BFGS legacy solver never did. Variables and constraint rows are hand-scaled in `_NLP.var/con`.
+old L-BFGS solve never did. Variables and constraint rows are hand-scaled in `_NLP.var/con`.
 
 **Local optima are real.** A cold start on a 2× mesh lands in a different, worse solution
 (cost 1.40 vs 0.65). Refine with `--refine`, which warm-starts through `tape.regrid`; a warm
@@ -155,16 +156,15 @@ per-phase re-integration under a tight adaptive integrator.
 **`tools/mj_track.py`** is what "ready for the next stage" means operationally. The audit says
 the tape is consistent with rigid-body physics; this says a dumb joint PD + feedforward, through
 MuJoCo's soft contact and the motor's real torque-speed clipping, actually lands it. Use
-`--monte-carlo` as the figure of merit when changing `Config` — the legacy reference landed
+`--monte-carlo` as the figure of merit when changing `Config` — the old reference landed
 78.5 % of trials; the current one lands 100 %.
 
 **Actuator limits come in two flavours.** `PEAK_TORQUE`/`hardware_torque_limits()` are datasheet
 peaks and must keep matching `go2.xml`'s `forcerange`; `mj_track` clips against them (with the
 torque-speed halfplanes) because that is what the motor does. The optimizer uses
 `Config.torque_sf × NOMINAL_TORQUE` (default 0.90) and `speed_sf` (0.90) so a tracking controller
-inherits headroom. Use `torque_speed_halfplanes()`-style linear envelopes for anything on a tape;
+inherits headroom. Use `torque_speed_halfplanes(peak)` for anything on a tape;
 `torque_speed_bound()` under-rates a back-driven motor (`tools/check_envelope.py`).
-`constants.TORQUE_SF`/`DESIGN_TORQUE` are legacy (0.98) and used only by `legacy/`.
 
 Drake is no longer in the optimization path — only `replay.py` (meshcat) and
 `verify_parity.py` use it.

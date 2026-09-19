@@ -233,7 +233,7 @@ def check_torque_tape(m) -> None:
     rng = np.random.default_rng(4)
     freqs = 0.7 + 0.3 * rng.random(12)
     t = np.arange(steps) * dt
-    tape = 0.3 * K.torque_limits() * np.sin(2 * np.pi * freqs * t[:, None])
+    tape = 0.3 * K.hardware_torque_limits() * np.sin(2 * np.pi * freqs * t[:, None])
 
     q0 = K.mj_qpos(K.TUCK_LEGS, 1.0)
     d.qpos[:], d.qvel[:] = q0, 0.0

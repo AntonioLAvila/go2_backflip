@@ -1,7 +1,7 @@
 # Backflip trajectory optimization — status
 
-Living log for the current (sagittal / CasADi) formulation. The three weeks of logs for the
-Drake formulation it replaced are in `legacy/drake_dircol/{STATUS,CONVERGENCE,RESUME}.md`.
+Living log for the current (sagittal / CasADi) formulation. The Drake formulation it replaced,
+and its three weeks of logs, were deleted on 2026-09-19; see git history before `30f0d0a`.
 
 ## Where it stands (2026-09-18)
 
@@ -10,7 +10,7 @@ Drake formulation it replaced are in `legacy/drake_dircol/{STATUS,CONVERGENCE,RE
 iterations (~6 s in IPOPT, ~40 s wall including CasADi graph construction), constraint violation
 1e-8, dual infeasibility ~1e-10.
 
-| | legacy reference (2026-09-06) | current |
+| | old Drake reference (2026-09-06) | current |
 |---|---|---|
 | IPOPT `is_success()` | never (dual inf. floor ~3, viol 0.58) | yes, from a cold start |
 | time to a solution | hours of chained restart bursts | ~40 s |

@@ -1,18 +1,16 @@
 """Sphere-swept witness points bounding every collision geom, for the TO's floor constraints.
 
 The trajectory optimization only ever knew about four point-feet, so nothing in it stopped the
-rest of the robot from passing through the floor -- and it did: the solved trajectory drove the
-rear thigh 69 mm and the head 72 mm below z = 0. Drake's exact tool (a SceneGraph +
-MinimumDistanceLowerBoundConstraint) means building the plant with geometry and paying a
-broadphase query per knot per autodiff evaluation, which is far more machinery than a flat
-floor needs.
+rest of the robot from passing through the floor -- and it did: an early solved trajectory drove
+the rear thigh 69 mm and the head 72 mm below z = 0. An exact signed-distance constraint means a
+broadphase query per node per derivative evaluation, far more machinery than a flat floor needs.
 
 A flat floor only needs the LOWEST point of each geom, and every collision geom in go2.xml is
 sphere-swept: sphere, capsule, cylinder (bounded by its capsule), or box (lowest point is
 always a corner, radius 0). So each geom becomes a handful of (point, radius) pairs in its
 body frame, and the whole constraint is `p_z(q) >= r`.
 
-The NLP pins quat_x = quat_z = 0, so the base has pitch only -- no roll, no yaw. World z of a
+The optimizer's model is sagittal, so the base has pitch only -- no roll, no yaw. World z of a
 body point is then independent of its y, which collapses every +-y mirror pair to one witness
 point and nearly halves the set. VERIFY below checks the emitted table against MuJoCo's own
 geom poses over random configurations, including the no-roll collapse.

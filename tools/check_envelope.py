@@ -18,7 +18,7 @@ def main() -> int:
     qd = rng.uniform(-1, 1, (10000, 12)) * K.speed_limits()
 
     # Half-plane cap in the motoring quadrant, i.e. tau taking the sign of qd.
-    hp = np.minimum(K.torque_limits(), tau_stall - k * np.abs(qd))
+    hp = np.minimum(K.hardware_torque_limits(), tau_stall - k * np.abs(qd))
     ref = np.array([K.torque_speed_bound(row) for row in qd])
 
     err = np.abs(hp - ref).max()
@@ -26,7 +26,7 @@ def main() -> int:
     print(f"[{'PASS' if ok else 'FAIL'}] motoring quadrant agrees -- max err {err:.2e} N.m")
 
     # Braking: the half-planes allow peak torque at any speed, torque_speed_bound does not.
-    brake = np.minimum(K.torque_limits(), tau_stall + k * np.abs(qd))
+    brake = np.minimum(K.hardware_torque_limits(), tau_stall + k * np.abs(qd))
     n = int((brake > ref + 1e-9).sum())
     print(f"[INFO] regenerating quadrant underated at {n}/{ref.size} samples, as intended")
 

@@ -44,6 +44,9 @@ def main() -> None:
                          "the impact transient")
     ap.add_argument("--hold", action=argparse.BooleanOptionalAction, default=True,
                     help="keep the meshcat server alive after publishing (default: on)")
+    ap.add_argument("--html", type=Path, default=None,
+                    help="write the animation as one self-contained HTML file and exit -- for "
+                         "viewing over ssh: scp it home and open it, no server or tunnel needed")
     ap.add_argument("--live", action="store_true",
                     help="stream in real time instead of recording an animation")
     ap.add_argument("--speed", type=float, default=0.25, help="--live playback rate")
@@ -94,6 +97,11 @@ def main() -> None:
     rec.set_loop_mode(MeshcatAnimation.LoopMode.kLoopRepeat)
     rec.set_autoplay(True)
     vis.PublishRecording()
+
+    if args.html:
+        args.html.write_text(meshcat.StaticHtml())
+        print(f"wrote {args.html} ({args.html.stat().st_size / 1e6:.1f} MB, {t[-1]:.3f} s)")
+        return
 
     print(f"meshcat: {meshcat.web_url()}")
     print(f"recorded {t.size} knots -> {t[-1]:.3f} s at {args.fps:g} fps")

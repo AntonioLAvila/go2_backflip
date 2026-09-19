@@ -33,8 +33,7 @@ FOOT_GEOMS = set(K.FEET)
 def hardware_clip(tau: np.ndarray, qd: np.ndarray) -> np.ndarray:
     """What the motor will actually deliver: datasheet peak and the torque-speed halfplanes."""
     pk = K.hardware_torque_limits()
-    stall = pk / (1.0 - K.CORNER_SPEED_FRAC)
-    k = stall / K.speed_limits()
+    k, stall = K.torque_speed_halfplanes(pk)
     return np.clip(tau, np.maximum(-pk, -stall - k * qd), np.minimum(pk, stall - k * qd))
 
 
@@ -187,6 +186,8 @@ def main() -> int:
     ap.add_argument("--push", type=float, default=0.0, help="N, random impulse-ish shove mid-tape")
     ap.add_argument("--no-ff", action="store_true", help="PD only, no feedforward torque")
     ap.add_argument("--view", action="store_true")
+    ap.add_argument("--save", type=Path, default=None,
+                    help="write the closed-loop rollout as an npz that traj_opt/replay.py plays")
     ap.add_argument("--sweep", action="store_true", help="robustness table instead of one run")
     ap.add_argument("--monte-carlo", type=int, default=0, metavar="N")
     args = ap.parse_args()
@@ -217,6 +218,10 @@ def main() -> int:
     else:
         log, n_ref, dt = rollout(ref, args.kp, args.kd, **kw)
 
+    if args.save:
+        n = log["qpos"].shape[0]
+        np.savez(args.save, t=dt * np.arange(n), qpos=log["qpos"], ctrl=log["tau"])
+        print(f"wrote {args.save}")
     s = score(log, n_ref, ref)
     print(f"closed-loop MuJoCo rollout of {args.npz}  (kp={args.kp:g}, kd={args.kd:g})")
     for k, v in s.items():
