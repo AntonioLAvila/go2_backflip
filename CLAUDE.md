@@ -4,268 +4,167 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-Stage 1 of a three-stage pipeline: **Drake full-order trajectory optimization → mjlab RL
-imitation → Unitree Go2 hardware**. This repo builds the first stage — a dynamically-feasible
-`t, q, v, tau` backflip reference trajectory for the Go2, produced by a Drake
-`DirectCollocation` trajectory optimization — plus the shared MJCF model and the Drake↔MuJoCo
-parity checks both later stages depend on. Nothing downstream (RL training, hardware) lives in
-this repo yet.
+Stage 1 of a three-stage pipeline: **trajectory optimization → mjlab RL imitation (or a
+deterministic tracking controller) → Unitree Go2 hardware**. This repo produces a dynamically
+feasible backflip reference for the Go2 — `t, qpos, qvel, qacc, ctrl`, the contact schedule and
+the planned ground forces — plus the shared MJCF model, the constants both later stages depend
+on, and the checks that prove the reference against MuJoCo. Nothing downstream lives here yet.
 
-The full original design (contact schedule rationale, constraint derivations, sizing
-calculations) is in the plan this was built from; the day-to-day numeric state of the
-optimization (current best result, what's converged, what isn't) is **not** in this file — see
-`traj_opt/STATUS.md`, which is the living log and is updated every session. Read it before
-assuming anything about where the optimization currently stands.
-**`traj_opt/CONVERGENCE.md`** is the 2026-09-06 convergence campaign's ledger — every
-hypothesis tried on getting the audit to 11/11, what was predicted, what was measured, and
-what is therefore ruled out. Read it before re-trying anything on convergence; sixteen solver
-options were screened and only the scaling ones mattered.
+`traj_opt/STATUS.md` is the living log: current numbers, what was tried, what is open. Read it
+before assuming where things stand.
+
+**History you should know about.** Until 2026-09-18 the optimizer was a Drake
+`DirectCollocation` program on the full 18-DOF model with sagittal symmetry imposed by
+constraints. It never once returned solver success; three weeks of work on it (LICQ repairs,
+restart-from-checkpoint searches, a 16-option IPOPT screen) is archived, with its complete logs,
+in `legacy/drake_dircol/`. It is not maintained and its scripts are not expected to run from
+there. The lesson it paid for, and the reason the current formulation looks the way it does:
+**impose a symmetry by parametrisation, never by constraint** — every pin on a coordinate the
+dynamics already propagate is a rank-deficient row waiting to happen.
 
 ## Environment
 
-The project is managed by **uv** (`pyproject.toml` + `uv.lock`, Python 3.12, venv at `.venv`).
-Drake and MuJoCo are ordinary locked dependencies — there is no `/opt/drake` system install to
-put on `PYTHONPATH`, and no `PYTHONPATH` is needed at all. Every script runs the same way:
+Managed by **uv** (`pyproject.toml` + `uv.lock`, Python 3.12, venv at `.venv`). CasADi, MuJoCo,
+Drake and mjlab are ordinary locked dependencies; no `PYTHONPATH` is needed.
 
 ```
 uv run traj_opt/<script>.py
 uv run tools/<script>.py
 ```
 
-The shared constants live in the installed package `go2_backflip` (`src/go2_backflip/`), which
-`uv sync` installs in **editable** mode, so edits to it take effect with no reinstall. Modules
-inside `traj_opt/` still import each other flat (`from program import ...`); that works because
-Python puts a script's own directory on `sys.path`, which is why only the cross-directory
-constants import needed to become a package.
+The shared package `go2_backflip` (`src/go2_backflip/`) is installed editable. Scripts inside
+`traj_opt/` import each other flat (`import flip`), which works because Python puts a script's
+own directory on `sys.path`.
 
 ## Commands
 
-**`traj_opt/reference/`** is the shipped trajectory, tracked in git: `backflip.npz` (500 Hz,
-MuJoCo convention), `backflip.npy` (the decision-variable vector that reproduces it), and
-`manifest.json` (audit result, mesh, commit, every check's margin). `traj_opt/out/` is scratch
-and gitignored, and a solve is not bit-reproducible across machines — IPOPT's linear algebra is
-threaded and hardware-dependent — so the best trajectory lives in the repo as an *artifact*, not
-as a recipe. Promote a new one with `uv run tools/ship.py <checkpoint>`, which re-audits it and
-**refuses to ship anything that audits worse** than what is already there (same
-`(checks failed, worst overrun)` key `restart_loop` ranks by). Downstream stages read
-`traj_opt/reference/backflip.npz`; `traj_opt/out/backflip.npz` is a working file.
-
 ```bash
-# Prove Drake and MuJoCo agree on go2.xml (structure, mass, mass matrix, inverse dynamics,
-# open-loop torque tape). Checks A-E must pass; F is report-only (contact is expected to differ).
+# Solve from a cold start (~40 s, of which ~6 s is IPOPT), audit the 500 Hz tape against MuJoCo,
+# roll it out closed-loop in MuJoCo. Writes traj_opt/out/backflip.npz. Every float field of
+# flip.Config is a flag (--torque-sf, --body-clearance, --mu, --w-du, ...).
+uv run traj_opt/solve.py [--quiet]
+uv run traj_opt/solve.py --ship --note "why"      # also promote to traj_opt/reference/
+uv run traj_opt/solve.py --refine 2               # re-solve on a 2x mesh, warm-started
+
+# The audit alone, on any tape (default: the shipped reference). MuJoCo-only physics checks.
+uv run traj_opt/validate.py [npz]
+
+# THE acceptance test: feedforward + joint PD through MuJoCo's own contact model with hardware
+# torque-speed clipping. Exit 0 iff it lands and stands.
+uv run tools/mj_track.py [npz] [--kp 60 --kd 2] [--view]
+uv run tools/mj_track.py --sweep                  # one perturbation at a time
+uv run tools/mj_track.py --monte-carlo 500        # all at once, randomised, parallel
+
+# Prove the CasADi sagittal model IS go2.xml restricted to its symmetry plane (~1e-12).
+uv run tools/verify_sagittal.py
+# Prove Drake and MuJoCo agree on go2.xml (Drake is now only used for meshcat replay).
 uv run tools/verify_parity.py
 
-# Solve the backflip. Writes traj_opt/out/backflip.npz (MuJoCo convention) even on failure,
-# for inspection. Key flags: --solver {ipopt,snopt} (default ipopt), --iters, --feas-tol,
-# --opt-tol, --feasibility-only, --restarts N --burst-iters K (short-burst restart search --
-# see "Restart-from-checkpoint" below, the single biggest lever found for this problem).
-uv run traj_opt/solve_backflip.py --restarts 20 --burst-iters 300
+# Hand-off to mjlab's motion-tracking task: 50 fps clip with standing holds on both ends.
+uv run tools/export_mjlab.py
 
-# Diagnose "solver reports infeasible on a problem that looks feasible" -- see LICQ note below.
-uv run traj_opt/nullity_check.py
+# Meshcat playback (Animations panel has the timeScale slider) / open-loop divergence.
+uv run traj_opt/replay.py --npz traj_opt/reference/backflip.npz
+uv run traj_opt/mj_divergence.py --npz traj_opt/reference/backflip.npz
 
-# Physics audit of a solved trajectory (rotation, ballistic flight, friction cone, torque
-# envelope, collocation-vs-integration drift) -- runs automatically at the end of solve_backflip.py.
-
-# Meshcat playback / MuJoCo open-loop divergence check of traj_opt/out/backflip.npz.
-# replay.py records a meshcat animation (one frame per 500 Hz knot) and holds the server
-# open, so playback speed is a timeScale slider in the browser's "Animations" panel rather
-# than a CLI flag. --live restores the old real-time streaming pass.
-uv run traj_opt/replay.py [--fps 500] [--no-hold]
-uv run traj_opt/replay.py --live [--speed 0.25] [--loops 3]
-uv run traj_opt/mj_divergence.py
-
-# Regenerate the self-collision-free sagittal tuck box (src/go2_backflip/constants.py:TUCK_BOX) and
-# sanity-check the linear torque-speed envelope against the true (non-smooth) one:
+# Regenerate model-derived constants (self-collision tuck box, floor-clearance witness spheres).
 uv run tools/tuck_box.py
+uv run tools/clearance_points.py
 uv run tools/check_envelope.py
-
-# Ask the audit's physics on the resampled 500 Hz tape rather than at the knots -- torque
-# against the enforced halfplanes and against hardware, and flight angular-momentum drift.
-# NOT a twelfth audit check: a trajectory can pass all eleven and fail this.
-uv run tools/check_tape.py [traj_opt/reference/backflip.npz]
-
-# Mesh refinement without editing schedule.py (see GO2_FLIGHT_KNOTS below):
-GO2_FLIGHT_KNOTS=99 uv run traj_opt/solve_backflip.py --warm-start traj_opt/out/refine/warm99.npz
-
-# Promote a solved checkpoint to the tracked reference trajectory (re-audits, refuses a
-# regression unless --force):
-uv run tools/ship.py traj_opt/out/checkpoints_<run>/best.npy --note "why"
-
-# Mesh refinement. Export FIRST, while schedule.py still matches the checkpoint, then edit the
-# knot count, then solve from the export. Refine on a 2n-1 grid (see below).
-uv run traj_opt/warm_start.py --checkpoint traj_opt/reference/backflip.npy \
-        --out traj_opt/out/refine/warm99.npz --flight-knots 99
-# ...now set flight to 99 in schedule.py...
-uv run traj_opt/solve_backflip.py --warm-start traj_opt/out/refine/warm99.npz --restarts 8
 ```
 
-No test suite exists; `verify_parity.py`, `check_envelope.py`, and the audit in
-`solve_backflip.py` are the correctness checks for this codebase.
+No unit-test suite exists; `verify_sagittal.py`, `validate.py` and `mj_track.py` are the
+correctness checks, in that order of dependence.
+
+`traj_opt/reference/` is tracked: `backflip.npz` (500 Hz, MuJoCo convention),
+`backflip_mjlab.npz` (the RL clip) and `manifest.json` (full `Config`, IPOPT status, every audit
+margin, the closed-loop result). A solve is a deterministic cold start, so the manifest's config
+is a *recipe* — but IPOPT/MUMPS are not bit-reproducible across machines, so the npz is still
+the artifact. `--ship` refuses unless IPOPT succeeded, the audit is clean, and the closed-loop
+rollout lands with no stray contact. `traj_opt/out/` is scratch and gitignored.
 
 ## Architecture
 
-**`go2_mjcf/`** (git submodule) is the single ground-truth MJCF, parsed independently by Drake
-and MuJoCo. **`src/go2_backflip/constants.py`** is the single source of truth for everything derived
-from it — actuator limits, poses, joint index layout, and the Drake↔MuJoCo state conversion —
-specifically so the Drake TO and the (future) mjlab RL config cannot drift apart. Two
-conversion details worth knowing before touching either engine: the quaternion/position blocks
-are swapped (`[quat, xyz]` in Drake vs `[xyz, quat]` in MuJoCo), and angular velocity is
-expressed in the **world** frame in Drake but the **body** frame in MuJoCo — a difference that
-only bites once the base is tilted, i.e. exactly during a flip. `torque_speed_bound()` (true,
-non-smooth envelope) and `torque_speed_halfplanes()` (its linear NLP-safe relaxation) read the
-same constants so they can't diverge except in the one place they're meant to (the regenerating
-quadrant).
+**`go2_mjcf/`** (git submodule) is the single ground-truth MJCF.
+**`src/go2_backflip/constants.py`** is the single source of truth for everything derived from it
+— actuator limits, poses, joint layout, the torque-speed envelope, witness spheres, and the
+Drake↔MuJoCo state conversion (quaternion/position blocks swapped; angular velocity world-frame
+in Drake, body-frame in MuJoCo).
 
-**`traj_opt/program.py`** builds `BackflipProgram`: one shared `MathematicalProgram` holding
-four `pydrake.planning.DirectCollocation` phases (`traj_opt/schedule.py` has the phase table; flight is at 50 knots as of 2026-09-04 and
-`program.py`'s `TUCK_RAMP` is a *fraction* of that count, not a fixed integer — keep it one —
-load/launch/flight/absorb, contact sets, knot counts). The trick that makes contact forces work
-as decision variables is the input port choice: `applied_spatial_force` is abstract-valued and
-can't be a DirectCollocation input, but `applied_generalized_force` is vector-valued (18) and
-already excludes gravity/damping (those are force elements inside `EvalTimeDerivatives`), so a
-per-knot constraint `port(k) == B@u_k + sum_i J_i(q_k)^T lambda_i_k` ties ordinary `u`/`lambda`
-decision variables to it. Phases are glued by state-continuity constraints, except the
-flight→absorb touchdown (`schedule.IMPACT`), which instead gets a full impulsive-contact equation
-(mass matrix times velocity jump equals the sum of foot impulses, no-slip enforced post-impact).
-Sagittal symmetry (hip pins, left/right leg mirroring, `quat_x=quat_z=0`) is enforced hard,
-which is also what turns "one full backflip" into a single terminal equality: with those
-components zeroed the base quaternion is `[cos(θ/2), 0, sin(θ/2), 0]`, so `-2π` lands exactly on
-`[-1,0,0,0]`, numerically distinct from identity.
+**`src/go2_backflip/sagittal.py`** is the model the optimizer uses: the Go2 restricted to its
+mirror-symmetric manifold, 7 coordinates `[x, z, theta, thigh_f, calf_f, thigh_r, calf_r]`, as
+CasADi expressions. Nothing is hand-derived: it reads MuJoCo's *compiled* `go2.xml` (tree,
+masses, inertias, armature, damping), assembles the Lagrangian of all 13 bodies symbolically,
+and lets CasADi differentiate. The mirrored hip-abduction coordinates are carried symbolically
+and evaluated at zero, which yields `hip()` — the torque needed to *hold* the hips at zero under
+load. That is a real limit a hand-written planar model would miss: the legacy reference ran its
+hips to 21.6 of 23.7 N·m (the shipped one peaks at 7.5). Conventions: `R_y(+theta)` tips the nose down so a backflip is `theta → -2π`; forces
+are **per foot**, torques **per motor**, and the factor 2 for the mirrored pair is applied inside
+`sagittal.py` and nowhere else. `embed_qpos/qvel/ctrl` lift to MuJoCo's full state.
 
-**The recurring bug class in this NLP is LICQ (constraint-qualification) violations**, not
-modeling errors: an *exact* equality that turns out to be implied by another already-imposed
-constraint (most often a state's own collocation defect, once a position pin holds at two
-consecutive knots, or a position pin paired with its exact kinematically-conjugate velocity)
-makes the active-constraint Jacobian rank-deficient at a point that is genuinely feasible.
-SNOPT's symptom is a silent, wrong `info=13` ("infeasible") on a point that isn't; IPOPT's is an
-outright `TOO_FEW_DOF` error. This has recurred three times so far, always inside
-`_add_symmetry`; the fix is always either dropping the redundant velocity-level pin or replacing
-an exact position equality with a tight (`TIGHT = 1e-4`) box. **`traj_opt/nullity_check.py`** is
-the diagnostic — an FD-Jacobian/SVD rank check over every equality binding at the initial guess
-— and should be the first thing run whenever a solver reports infeasibility on a problem that
-looks right, before any other debugging.
+**`traj_opt/flip.py`** is the NLP: four phases (load / launch / flight / absorb, same schedule
+rationale as always — front feet supply the pitch-up moment and leave first), each transcribed by
+Hermite–Simpson in **separated form**: every node, knot *and* midpoint, has its own
+`(q, v, a, u, λ)` and satisfies the equations of motion there, so nothing is first-order-held.
+Three design decisions carry the whole thing, and each exists to keep the constraint Jacobian
+full rank:
 
-**`traj_opt/guess.py`** builds the analytic initial guess: hand-authored kinematic paths per
-phase, converted to `(u, lambda)` per knot via the manipulator equation, then (for
-launch/flight, where the hand-authored path's implied accelerations are least trustworthy)
-**re-simulated forward** through the exact same `applied_generalized_force` port
-DirectCollocation itself uses, so the guess satisfies the true dynamics exactly rather than only
-balancing them pointwise per knot. This single-shooting step was a large, measured improvement
-to solver performance — see `traj_opt/STATUS.md` for the numbers.
+* **Stance is an ODE, not a DAE.** The rolling-sphere foot constraint is imposed at the
+  *acceleration* level at every node with Baumgarte feedback
+  (`g̈ + 2αġ + α²(g − g0) = 0`). With the equations of motion that is a square nonsingular system
+  for `(a, λ)`; the flow stays on the contact manifold because it starts there (HOME at rest;
+  inherited; or the impact map's `J v⁺ = 0`). **Do not add position or velocity foot pins on
+  top** — they are implied by the defects and are exactly the LICQ failure that sank the legacy
+  formulation. The audit measures the resulting drift instead (tens of microns).
+* **Boundary conditions pin only as many things as the manifold has freedoms.** Terminal:
+  `theta`, four leg angles, base velocity (3), base acceleration (3). Base height and joint rates
+  follow from the contact constraint. Initial `a_base = 0` makes the start a static equilibrium
+  so a standing hold can be spliced on.
+* **A constraint already fixed by a neighbouring phase is skipped at the shared knot**
+  (swing-foot clearance at a lift-off/touchdown knot; the friction cone where `λ` is pinned to
+  zero for release).
 
-**`traj_opt/solve_backflip.py`** is the CLI: builds the program, sets the guess, solves
-(feasibility pass, then a costed pass), optionally runs a **restart-from-checkpoint** loop
-(`restart_loop()`), extracts/resamples the result onto a uniform 500 Hz grid, and writes
-`traj_opt/out/backflip.npz` in MuJoCo convention (even on non-success, for inspection — never
-treat that output as validated without checking `result.is_success()`/the audit). The restart
-loop exists because continuous IPOPT runs on this problem reliably wander away from good points
-once they find them; short bursts that always **chain forward** from each burst's raw result
-(never revert to the best-seen point — IPOPT is deterministic given identical start/options, so
-reverting just reproduces the same result forever) explore new territory instead. Every burst's
-raw decision-variable vector is saved to `traj_opt/out/checkpoints/` immediately, since a good
-point is one burst away from being overwritten by a worse one.
+The foot is a rolling sphere: `foot()` is holonomic in the plane (`x_centre − R·calf_pitch`,
+`z_centre − R`) and its Jacobian is exactly the *material* contact point's, so one `J` serves the
+constraint and the `Jᵀλ` term. Touchdown is an inelastic impact (`MΔv = 2JᵀΛ`, `Jv⁺ = 0`, impulse
+in the friction cone). Swing-foot clearance ramps in over a fixed **fraction** of the phase —
+anything counted in nodes makes the optimum move with the mesh.
 
-**Bursts are ranked by the audit — `(checks failed, worst overrun ratio, violation)` —
-not by `max_violation`** — the two anti-correlate on this
-problem, hard, and `STATUS.md` has the numbers in both directions (a point at 124x lower
-violation that audits *worse*; a point at 8.6x higher violation that is better on every physics
-check and is what the repo now ships). `max_violation` sees the knots only, so it is blind by
-construction to a cubic that rings between them while satisfying the defects exactly at them.
-`best.npy` is the best-auditing burst and `best_viol.npy` the lowest-violation one, kept so
-runs stay comparable with the older numbers in `STATUS.md`. If you are tempted to rank on the
-violation again, read the 2026-09-04 section first.
+IPOPT gets exact gradients, Jacobians and Hessians from CasADi (`expand=True`), which is why a
+crude piecewise-linear key-pose guess (`initial_guess`) converges in ~50 iterations where the
+L-BFGS legacy solver never did. Variables and constraint rows are hand-scaled in `_NLP.var/con`.
 
-**`traj_opt/audit.py`** is the physics check independent of the solver's own reported residuals:
-net rotation, ballistic flight (CoM parabola + angular momentum conservation), friction-cone
-compliance, torque-envelope compliance, and — specific to this transcription — re-simulating
-each phase with a tight-tolerance integrator to price the error introduced by Hermite-Simpson's
-first-order-hold of the *generalized force* (so the contact term at collocation points is the
-average of endpoint `J^T lambda`, not `J(q_col)^T lambda_col`; contact constraints themselves
-bind at knots only).
+**Local optima are real.** A cold start on a 2× mesh lands in a different, worse solution
+(cost 1.40 vs 0.65). Refine with `--refine`, which warm-starts through `tape.regrid`; a warm
+start also switches IPOPT to a low monotone barrier. Expect the cost to rise ~15–20% on
+refinement: torque is allowed to jump across a contact switch and the post-lift-off retraction
+transient sharpens as the mesh resolves it. Forcing torque continuity or a hard slew limit was
+tried and doubles the cost or goes locally infeasible — see `STATUS.md`.
 
-**Actuator limits come in two flavours and mixing them up is the trap.** `PEAK_TORQUE` /
-`hardware_torque_limits()` are the datasheet peaks (hip/thigh 23.7, calf 45.43 N.m) and must
-keep matching `go2.xml`'s `forcerange` — `verify_parity` Check A compares Drake's
-`effort_limit()` against MuJoCo's `forcerange`, and `mj_divergence.py` clips against them
-because that is what the real actuator does. `DESIGN_TORQUE` / `torque_limits()` are what the
-**optimization and the audit** enforce: `TORQUE_SF = 0.98` of nominal, i.e. hip/thigh 23.226 and
-calf 44.100, the calf derated from Unitree's advertised 45 rather than the MJCF's 45.43. Every
-solver and audit path calls `torque_limits()`, so the factor applies everywhere by default;
-reach for `hardware_torque_limits()` only when simulating the physical motor.
+**`traj_opt/tape.py`** resamples a solution. Inside an interval the solution *is* a polynomial
+(cubic Hermite for `q`, `v`; quadratic for `a`, `u`, `λ`), so the tape is that polynomial
+evaluated, not a fit. `regrid` is the same evaluation onto another mesh.
 
-The factor exists because the trajectory that preceded it rode the limits exactly — thigh and
-calf both at 100.0% — leaving a tracking policy no torque authority at launch, where all three
-peaks occur. It also absorbs a real hazard: **the audit checks the envelope at knots only, and
-the 500 Hz tape rings between them.** The old trajectory exceeded the enforced envelope by
-4.86 N.m on 6.1% of steps while the audit reported `0.00e+00` overshoot. With the margin, the
-shipped tape stayed 0.481 N.m clear of the hardware **flat peak** everywhere.
+**`traj_opt/validate.py`** is the audit, run on the 500 Hz tape (between knots, where a
+transcription hides things) and asked of **MuJoCo alone** wherever possible so the CasADi model
+cannot vouch for itself: `mj_inverse` residual against `ctrl + Σ Jᵀ grf`, design and hardware
+torque-speed halfplanes, limits, unilateral/cone/no-slip contact, `mj_geomDistance` floor
+clearance of every non-foot geom, ballistic CoM and conserved angular momentum in flight, and
+per-phase re-integration under a tight adaptive integrator.
 
-**That last claim was too generous, and 2026-09-06 corrected it.** 0.481 N.m is clearance
-against `|tau| <= tau_peak` with no speed derating. Measured against the hardware *torque-speed*
-envelope — the same halfplane form, built on the datasheet peaks — that trajectory was over by
-**1.85 N.m**. A safety factor on the flat peak does not protect a tape that rings at speed,
-which is where the ringing actually happens. `tools/check_tape.py` reports both, and the
-trajectory shipped on 2026-09-06 is over by 0.51 N.m rather than 1.85. Auditing the resampled
-tape is no longer a TODO — that is what `check_tape.py` is.
+**`tools/mj_track.py`** is what "ready for the next stage" means operationally. The audit says
+the tape is consistent with rigid-body physics; this says a dumb joint PD + feedforward, through
+MuJoCo's soft contact and the motor's real torque-speed clipping, actually lands it. Use
+`--monte-carlo` as the figure of merit when changing `Config` — the legacy reference landed
+78.5 % of trials; the current one lands 100 %.
 
-**`traj_opt/warm_start.py`** is mesh refinement, and two things about it are load-bearing.
-**Refine on a `2n-1` grid**, so the new knots are a superset of the old: flight torques swing
-~13 N.m between adjacent knots on this problem, so a grid that does not retain the old
-breakpoints distorts the first-order-held input badly (50→76 leaves the guess at violation 587;
-the bisection 50→99 gives 10.8). And **nothing may re-time a knot** — `set_guess` must set
-`dc.state(k)`/`input(k)`/`time_step(k)` per knot rather than calling
-`dc.SetInitialTrajectory`, which derives one uniform `h` and resamples at `i*h`. Solved grids
-are never uniform: `AddEqualTimeIntervalsConstraints` is a chain of adjacent equalities with
-nothing bounding the accumulated drift, so flight `h` spans 17%, and substituting uniform `h`
-into the shipped point takes it from violation 0.1287 to 152. Those bugs made every warm start
-this repo ever ran silently wrong, and hid for two weeks because `guess.py`'s analytic grid
-*is* uniform, so the cold-start path was immune. The round trip is the regression test: export
-a solution at its own knot count and it must come back bit-exact.
+**Actuator limits come in two flavours.** `PEAK_TORQUE`/`hardware_torque_limits()` are datasheet
+peaks and must keep matching `go2.xml`'s `forcerange`; `mj_track` clips against them (with the
+torque-speed halfplanes) because that is what the motor does. The optimizer uses
+`Config.torque_sf × NOMINAL_TORQUE` (default 0.90) and `speed_sf` (0.90) so a tracking controller
+inherits headroom. Use `torque_speed_halfplanes()`-style linear envelopes for anything on a tape;
+`torque_speed_bound()` under-rates a back-driven motor (`tools/check_envelope.py`).
+`constants.TORQUE_SF`/`DESIGN_TORQUE` are legacy (0.98) and used only by `legacy/`.
 
-Refinement is not, however, a way to buy accuracy here. 50→99 moved the one failing audit check
-(flight angular momentum) by 5%, where 4th-order convergence predicted 16x, because at
-violation ~0.14 the discretization error is an order of magnitude below the residual
-infeasibility. See `traj_opt/STATUS.md`, 2026-09-05.
-
-**Two settings are what take the audit from 9/11 to 11/11, and both are defaults now.**
-
-**`nlp_scaling_max_gradient = 1`** in `solve_backflip.ipopt_options`. IPOPT's gradient-based
-scaling is on by default and caps the max gradient element at 100; on this problem that put
-every restart burst into IPOPT's **restoration phase on its second iteration**, where it
-stayed for the rest of the burst while `inf_pr` *grew* — 0.138 to 18 over 206 iterations. The
-restart loop's long-documented "finds a good point early, then degrades for 16 straight
-bursts" was that, not IPOPT wandering. Note `nlp_scaling_method=none` goes much further on
-`max_violation` (0.1375 → 0.0012 in one burst) and is **not** what you want: that point audits
-8/11. Same lesson as everywhere else in this repo — lower violation is not a better trajectory.
-
-**`--flight-amom`** (`program.py:_add_flight_momentum`, box `AMOM_BOX = 1e-6`, on by default;
-pass `0` to disable). In flight the only external force is gravity, which acts *at* the CoM, so
-angular momentum about the CoM is exactly conserved by the true dynamics — and nothing in the
-formulation said so. Two parts, and both are needed: a **chained** bound on `|L(k+1) - L(k)|`
-over all three components (chained, not anchored to knot 0 — 49 rows reaching back to one knot
-put a dense block through direct collocation's banded Jacobian and measured far worse), plus
-`AMOM_LATERAL`, an **absolute** box on `|L_x|` and `|L_z|` at every flight knot. The absolute
-part is not redundant: `_add_symmetry` pins positions and torques and says nothing about
-velocities, `L_x` is a velocity quantity, and without the anchor the audit's momentum check
-floors at 1.0e-3 on `L_x` no matter what the chain does to `L_y`. With `--flight-amom` on, the
-audit's momentum check is *enforced* rather than emergent, so read
-`collocation matches a tight integrator` as the independent readout of transcription error.
-
-**`tools/check_tape.py`** asks the audit's physics on the resampled 500 Hz tape instead of at
-the knots — torque against the enforced halfplanes (and against hardware), and flight
-angular-momentum drift. It is deliberately not a twelfth audit check: a trajectory can pass all
-eleven and fail this, and the shipped one does. Use `torque_speed_halfplanes()` and never
-`torque_speed_bound()` for tape torque — `tools/check_envelope.py` proves they agree to 1e-12
-in the motoring quadrant and differ only in braking, where the latter under-rates a back-driven
-motor and invents +28 N.m failures that are not real.
-
-**`GO2_FLIGHT_KNOTS`** overrides `schedule.py`'s flight knot count, so a mesh-refinement run
-can happen side by side with 50-knot work. Editing the number in the file breaks every 50-knot
-checkpoint in `traj_opt/out/` the moment it changes, including ones a concurrent search is
-still writing.
-
-Solver preference: IPOPT over SNOPT for this contact-rich problem (SNOPT has never once
-returned success here). Both are still runnable via `--solver`. Note also that Drake's
-`SetVariableScaling` is a **no-op under IPOPT** (it says so in a warning), so `program._scale()`
-has never affected any IPOPT solve this repo has run — it is live for SNOPT only.
+Drake is no longer in the optimization path — only `replay.py` (meshcat) and
+`verify_parity.py` use it.

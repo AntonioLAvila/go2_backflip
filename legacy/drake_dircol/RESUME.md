@@ -1,17 +1,51 @@
-# Resume here — 2026-09-08 end of session
+# Resume here — 2026-09-09 end of session
 
-Read this first, then `traj_opt/CONVERGENCE.md` for detail (M24/M25 and K14/K15 are this
-session's entries). `STATUS.md` is the long-form history. Nothing is uncommitted as documentation
-— code changes below ARE uncommitted; see "Uncommitted state" at the bottom.
+Read this first, then `traj_opt/CONVERGENCE.md` for detail (M26/M27/K15-resolved/K16/K17 are
+this session's entries, on top of 2026-09-08's M24/M25/K14). `STATUS.md` is the long-form
+history. Code changes from 2026-09-08 are committed (`1c710c7`, branch `kkt-convergence`);
+everything from today (2026-09-09, doc-only) is uncommitted — see "Uncommitted state".
 
 ## State in one line
 
-**Part I is unchanged: shipped, 11/11, on `main`.** Part II gained a real tool (strict
-complementarity, and it's ruled out as the blocker) and a real new lever (`--w-vrate`) whose
-first test was inconclusive because of how it was tested, not because it failed. Both are on
-`kkt-convergence`, uncommitted.
+**K15 is a real, narrow win, and the shape of the win is itself the finding.** `--w-vrate 0.1`
+has a genuine ~10-iteration-wide basin (`--burst-iters` roughly 76-83) where independent short
+bursts from the seed land at worst-margin 0.88-0.89x (vs the shipped reference's 0.98x) and
+substantially better tape torque-envelope compliance — confirmed at TWO points in the basin
+(80 and 83), not one lucky checkpoint. But a 300-iteration chain from the same seed and weight
+walks straight past this basin and degrades exactly like every chain before it (M27) — so the
+basin exists but is not yet reliably reachable by a normal search. That's next session's job.
 
-## What happened this session
+## What happened this session (2026-09-09), in the order it happened
+
+1. **Ran the previous session's prescribed plan**: a zero-cost `kkt_check.py --w-vrate W`
+   pre-filter (moved the wrong way with `W`, turned out not predictive — demoted, see
+   CONVERGENCE.md M26), then five INDEPENDENT 80-iteration bursts from the seed across
+   `w_vrate in {0.01, 0.03, 0.1, 0.3, 1.0}`. All five held 11/11 in one burst — already sharper
+   than any of the previous session's three 5-burst CHAINS, none of which held 11/11 past their
+   own first burst. `w_vrate=0.1` won: worst margin 0.88x vs the seed's 0.98x, and a real tape
+   improvement (hardware-envelope overshoot 0.51 N.m -> 0.01 N.m, design-envelope 0.79 -> 0.27
+   N.m), at the cost of a mild momentum regression (1.34e-3 -> 1.50e-3 peak-to-peak) — exactly
+   the mechanism M11 predicted (`w_vrate` targets `qd` ringing, not momentum).
+2. **Launched `search_vrate01`** (10 restarts x 300 iterations) to check reproducibility with
+   more search. **It came back WORSE, not better**: burst 0 alone (same seed, same weight, just
+   300 iterations instead of 80) landed at 0.99x, barely passing — and since IPOPT is
+   deterministic from a fixed start, its first 80 iterations are bit-identical to the winning
+   screen run. **IPOPT passes through the same good point around iteration 80 and then walks
+   away from it over the next 220 iterations, within that single burst.** The 9 chained bursts
+   after that degraded further, same pattern as every prior chain. This showed the "peaks early,
+   degrades" pattern this project has documented since 2026-09-04 is not only a between-burst
+   phenomenon — it happens WITHIN one continuous run too (CONVERGENCE.md M27, K17 `LOSS`).
+3. **Ran a burst-length sweep** (`--burst-iters` in `{50,65,80,95,110,130,160}`) to map out
+   whether 80 was a fluke. At that resolution it LOOKED like an isolated spike (65 and 95 were
+   both ordinary) — worrying, since a real basin should have width. A finer sweep
+   (`{70,73,76,80,83,86,90}`) resolved it properly: **76, 80, and 83 all cluster at margin
+   0.88-0.89x** — a real ~10-iteration basin, not noise; the coarse sweep's neighbours simply
+   fell just outside its edges. Checked the tape at a second basin point (83, not just 80): same
+   pattern, smaller magnitude (design overshoot 0.79 -> 0.41 N.m, hardware 0.51 -> 0.12 N.m,
+   momentum 1.34e-3 -> 1.46e-3). Confirms the improvement is a property of the basin, not one
+   lucky checkpoint.
+
+## What happened before this (2026-09-08), condensed
 
 1. **Fixed a documentation bug**, unrelated to convergence: `CLAUDE.md` said the impulsive
    touchdown fires at "load→launch" (a liftoff). It's `schedule.IMPACT = 3`, flight→absorb —
@@ -75,48 +109,70 @@ full numbers in CONVERGENCE.md M25. Two things make this weaker evidence than it
   alongside them. Three penalty weights picked independently, then combined, is exactly the kind
   of thing that needs rechecking together.
 
+(2026-09-08's "next session" plan above is what today's session executed — kept for the
+reasoning, superseded as a to-do list by what follows.)
+
+## The open question: the basin is real but not reliably reachable
+
+Established this session: at `w_vrate=0.1`, `--burst-iters` in roughly **76-83** lands in a
+genuine, reproducible-across-two-tested-points basin (worst margin 0.88-0.89x, better tape
+torque compliance than the shipped reference). Also established: a normal 300-iteration burst
+from the identical start walks straight past that basin (by construction — its first 80
+iterations ARE the winning run, then it keeps going and gets worse) and a 10-restart chain from
+there degrades further, same as every chain before it. **So the basin exists, but "just run
+`--burst-iters 80`" is not yet a search recipe** — it depends on already knowing the right
+number, which was found by sweeping, not derived.
+
 ## Next session: what to actually run
 
-**Do not repeat 5x300-iteration chains as the way to test a cost-term weight.** Use the cheap
-screen first:
+1. **Test whether the basin survives from a DIFFERENT seed.** Everything so far is one seed
+   (the shipped reference) — Part I's reproducibility bar was "six independent chains reach
+   11/11"; this is one point in seed-space with two nearby-iteration-count confirmations, which
+   is real evidence but a much lower bar. Cheapest test: take one of the OTHER audit-11/11
+   candidates from Part I's `t3_b0`-selection table (STATUS.md/CONVERGENCE.md M13 lists `r1`,
+   `t3_b2`, `n9`, `q2`, `u10`) as a second seed and repeat the same independent-burst,
+   `w_vrate=0.1`, `--burst-iters` ~76-86 screen against it.
+2. **Turn the basin into a reachable search recipe, not a located point.** Two options, in order
+   of how much they cost:
+   - Cheapest: run `restart_loop` with `--burst-iters` actually INSIDE the basin (e.g. 80) for
+     several restarts, instead of 300 — since chaining forward from a basin point might behave
+     differently than chaining from the seed itself (never tested; every restart so far started
+     either at 80 iterations exactly once, or at 300). If the SECOND burst (chained from the
+     80-iteration point) also lands in a similar basin, that is a real, usable two-burst recipe.
+   - More informative but more code: add a callback that tracks the audit/tape-best INTERMEDIATE
+     iterate during a burst (Drake's `DirectCollocation`/`MultipleShooting` supports
+     `AddCompleteTrajectoryCallback`, seen in `pydrake.planning`'s own docstring), so a good
+     point passed through mid-burst is captured automatically instead of requiring a correct
+     guess of `--burst-iters` in advance. This is the structural fix for what M27 found; flagged
+     here rather than built, since it changes `solve_backflip.py`'s solve loop and deserves
+     sign-off before implementing.
+3. **Only once (1) or (2) gives something reproducible enough to trust**, ship it:
+   ```
+   uv run tools/ship.py <checkpoint> \
+       --note "w_vrate=0.1, burst-iters ~80: worst margin 0.88x vs 0.98x, tape hardware-envelope 0.01 vs 0.51 N.m"
+   ```
+4. Lower priority, still worth doing: a wider `w_vrate` sweep around 0.1 (0.05, 0.07, 0.15, 0.2),
+   and only after the above, retuning `amom_penalty`/`sym_penalty` jointly with `w_vrate` before
+   re-attempting the full-rank formulation (`vopt_repaired`'s 1.4e13 blowup from 2026-09-08 was
+   very likely those weights clashing, not evidence against either piece individually).
 
-```
-# 1. Screen w_vrate ALONE (hard-box formulation, no penalty terms) at several weights, each an
-#    INDEPENDENT 80-iteration burst from the seed -- not chained. ~2 min each, 5 values ~10 min
-#    total, replaces one of today's ~55-minute chains with something 5x more informative.
-for w in 0.01 0.03 0.1 0.3 1.0; do
-  uv run traj_opt/solve_backflip.py --start-checkpoint traj_opt/reference/backflip.npy \
-      --no-prepass --restarts 1 --burst-iters 80 --w-vrate $w \
-      --out traj_opt/out/screen_vrate_$w.npz
-done
-
-# 2. Cheaper still, no solve at all: does adding the term even reduce the stationarity residual
-#    AT THE SEED (unmoved)? Not proof a solve improves, but a term that fails this is a bad sign
-#    for ~0 cost.
-for w in 0.01 0.03 0.1 0.3 1.0; do
-  uv run traj_opt/kkt_check.py --w-vrate $w | grep "STATIONARITY" -A1
-done
-
-# 3. Only once a weight wins the screen: retune amom_penalty/sym_penalty jointly with it (don't
-#    reuse 10 / 1e3 unchanged) before re-attempting the full-rank + w_vrate combination.
-```
-
-If a proper sweep still can't find a `w_vrate` (or combination) whose short screen beats the
-seed, that upgrades K15 from `INCONCLUSIVE` to a real negative result, and it would be worth
-revisiting RESUME's original decision 1 from 2026-09-06: stop chasing `is_success()`-style
-convergence on this formulation, the audit-passing artifact is what downstream RL actually
-consumes, and the two structural wins (K9/K10 rank fix, K14 complementarity) are worth writing
-up and merging on their own regardless of whether Part II's ultimate target is ever reached.
+If (1) fails — the basin turns out to be specific to this one seed — that is still worth
+recording as a real, if narrower, result: `--w-vrate` demonstrably CAN produce a better basin,
+even if this project doesn't yet have a reliable way to land in one on demand. That would be the
+moment to revisit the original 2026-09-06 decision: stop chasing `is_success()`-style
+convergence, the audit-passing artifact is what downstream RL consumes, and the structural wins
+(K9/K10, K14) are worth writing up and merging regardless of Part II's ultimate target.
 
 ## Uncommitted state
 
-`git status` on `kkt-convergence`: `CLAUDE.md`, `traj_opt/kkt_check.py`, `traj_opt/program.py`,
-`traj_opt/solve_backflip.py` modified; `traj_opt/check_quat_interp.py` untracked (new, working,
-not yet decided whether it should become a tracked diagnostic alongside `kkt_check.py`). Nothing
-committed this session — ask before committing, per standing instructions. The three verification
-runs also wrote `traj_opt/out/verify_{baseline,vrate,repaired}.npz` and
-`traj_opt/out/checkpoints_verify_{baseline,vrate,repaired}/` (gitignored scratch, safe to
-delete).
+`git status` on `kkt-convergence` should be clean except for today's (2026-09-09) work, since
+2026-09-08's changes are committed (`1c710c7`). Today added no code changes (the `w_vrate`
+machinery already existed) — only `traj_opt/CONVERGENCE.md` (M26/M27/K15-K17) and this file.
+Scratch outputs from today's screens (`traj_opt/out/{screen_vrate_*,search_vrate01,
+screen_burstlen_*}.npz` and their `checkpoints_*` directories) are gitignored — safe to delete,
+but worth keeping until the next session's seed-robustness test is done, since
+`checkpoints_screen_burstlen_80/best.npy` and `..._83/best.npy` are the two basin points that
+matter.
 
 ---
 

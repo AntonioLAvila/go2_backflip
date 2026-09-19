@@ -1032,3 +1032,127 @@ right direction even though it wasn't enough to win outright at this budget.
 
 Both things this session actually established — K14 (complementarity holds, full stop) and the
 `CLAUDE.md` impact-phase documentation error — stand regardless of K15's inconclusive result.
+
+---
+
+## M26 — K15 resolved: chaining was the wrong instrument, and `w_vrate` genuinely helps
+
+2026-09-09 ran exactly what RESUME.md's "Next session" section prescribed instead of another
+chain: five INDEPENDENT 80-iteration bursts, each restarting fresh from the shipped seed
+(`--restarts 1 --burst-iters 80`, hard-box formulation, no penalty terms), one per `w_vrate` in
+`{0.01, 0.03, 0.1, 0.3, 1.0}`.
+
+| `w_vrate` | burst viol | audit | worst margin |
+|---|---|---|---|
+| 0.01 | 1.107 | 11/11 | 0.98x |
+| 0.03 | 1.370 | 11/11 | 0.91x |
+| **0.1** | **0.586** | **11/11** | **0.88x** |
+| 0.3 | 1.287 | 11/11 | 0.98x |
+| 1.0 | 0.937 | 11/11 | 0.99x |
+
+All five hold 11/11 in a SINGLE burst — already a sharper result than any of the three 5-burst
+chains from M25, none of which held 11/11 past burst 0. That alone confirms the diagnosis:
+chaining forward was compounding one bad burst into the next, not testing the objective.
+
+`w_vrate=0.1` stands out: **worst margin 0.88x, better than the shipped reference's own 0.98x**,
+at essentially the same violation (0.586 vs 0.5797) — the first time any search this campaign
+has run has beaten the shipped point on the audit's own ranking key, in one 80-iteration burst
+with no restart search at all. Checked against `check_tape.py` (the between-knot readout, never
+the audit alone — M13):
+
+| tape metric | shipped reference | `w_vrate=0.1`, burst 0 |
+|---|---|---|
+| design-envelope overshoot | +0.79 N.m on 0.44% | **+0.27 N.m on 0.29%** |
+| hardware-envelope overshoot | +0.51 N.m | **+0.01 N.m** (essentially clears it) |
+| flat-peak clearance | 0.48 N.m | **0.71 N.m** |
+| flight AM peak-to-peak | 1.34e-3 | 1.50e-3 (worse, both fail the 1e-3 bound) |
+
+Two of three tape failures improve substantially — the hardware-envelope overshoot, the one that
+actually matters for whether the trajectory asks a real motor for more than it has, drops from
+0.51 N.m to 0.01 N.m, a 51x improvement achieved by a single short burst adding one cost term.
+This is exactly the mechanism M11 predicted: `w_vrate` targets `qd` ringing between knots, and
+the design/hardware envelope overshoot IS that ringing. It was never targeting the momentum
+check (that's `--flight-amom`'s job), so its mild regression there (1.34e-3 -> 1.50e-3) is a
+real trade-off, not a surprise.
+
+| # | hypothesis | change | predicted | measured | verdict |
+|---|---|---|---|---|---|
+| K16 | Independent (non-chained) bursts are the right instrument to screen a cost-term weight | 5 independent 80-iter bursts vs. the 5x300 chains in M25 | cleaner signal | all 5 hold 11/11 (chains held it for 0 of 15 bursts past the seed); confirms the M25 chaining critique | `WIN` — this is now the standard way to screen a weight on this problem |
+| K15 (resolved) | A velocity-smoothness cost term makes a KKT point of the objective a good trajectory | `--w-vrate 0.1` | a point at or better than the seed on the audit, ideally also the tape | worst margin 0.88x vs seed's 0.98x; tape hardware-envelope overshoot 0.51 -> 0.01 N.m; tape momentum 1.34e-3 -> 1.50e-3 (worse) | `WIN`, with a caveat — genuinely better on torque/hardware-clearance, genuinely worse (mildly) on momentum. One burst, one seed: not yet the "six independent chains" reproducibility bar Part I set. A longer search (`search_vrate01`, launched 2026-09-09) is running to see whether it holds up and whether the momentum trade-off can be recovered |
+
+The zero-cost `kkt_check.py --w-vrate W` stationarity residual at the (unmoved) seed moved the
+WRONG way as `W` grew (6.1e-2 at 0.01 to 1.5e-1 at 1.0) — a soft warning sign that turned out not
+to predict the real outcome. Read in hindsight: that check measures whether the new term's
+gradient AT A FIXED POINT is already explained by the existing active set, which is a
+generically-false thing to expect from a smooth term evaluated away from its own minimum; it
+says nothing about where a SOLVE carries the point. Demoted from "cheap pre-filter" to "one more
+number, not load-bearing" for future weight screens.
+
+## M27 — the good point is transient WITHIN a burst, not just across bursts
+
+`search_vrate01` (10 restarts x 300 iterations, `--w-vrate 0.1`, same seed as the screen above)
+ran to completion. Its burst 0 — same start, same options, same weight as the 80-iteration
+screen, differing ONLY in iteration budget — landed at **viol 1.036, audit 11/11, worst 0.99x**.
+Worse than the screen's 0.586/0.88x, and barely better than the seed's own 0.98x. Bursts 1-9,
+chaining forward from that already-mediocre endpoint, degraded exactly the way every chain in
+this campaign has (down to 6/11, viol 681 at burst 4). `restart_loop`'s own best-tracking
+correctly never beat the seed across all 10 bursts.
+
+**Because IPOPT is deterministic given an identical start and options** (confirmed repeatedly
+in this project, e.g. STATUS 2026-09-04's `m1`/`m2` bit-identical chains), the first 80
+iterations of this 300-iteration burst 0 are BIT-IDENTICAL to the standalone 80-iteration screen
+run. So IPOPT passes THROUGH the good point (0.586, 0.88x) at iteration ~80 of this very burst,
+and then, given 220 more iterations to work with, **walks away from it** to a worse 11/11 point
+by iteration 300. The "peaks early, degrades" pattern this project has documented since
+2026-09-04 as a BETWEEN-burst phenomenon is also a WITHIN-burst one — it is not specific to the
+restart-chaining mechanism at all, it is what this objective's descent does whenever it is given
+enough iterations, chained or not.
+
+This reframes what `--burst-iters` actually is for this objective: not "how long to let IPOPT
+work before checkpointing," but a hyperparameter that has to be short enough to catch the
+optimizer while it is still near the good point and long enough to have reached it at all. 80
+was a round-number guess, not a located value.
+
+| # | hypothesis | change | predicted | measured | verdict |
+|---|---|---|---|---|---|
+| K17 | More iterations (restarts or burst length) reliably find as-good-or-better points once `w_vrate` is in the objective | `search_vrate01`, 10x300 | improves on or matches the 80-iter screen | burst 0 alone is already worse (0.99x vs 0.88x) than the screen at the SAME start; every later burst is much worse | `LOSS` — confirms K16 more sharply: it is not merely that CHAINS are the wrong instrument, single bursts also have a wrong LENGTH if left too long |
+
+A burst-length sweep at `w_vrate=0.1` (independent single bursts, `--burst-iters` in
+`{50, 65, 80, 95, 110, 130, 160}`) mapped where the good point actually sits:
+
+| `burst_iters` | 50 | 65 | **80** | 95 | 110 | 130 | 160 |
+|---|---|---|---|---|---|---|---|
+| viol | 1.09 | 1.11 | **0.59** | 1.01 | 1.04 | 1.31 | 1.23 |
+| worst margin | 0.98x | 0.92x | **0.88x** | 0.99x | 0.99x | 0.98x | 0.99x |
+
+At that resolution 80 looked like an isolated spike (65 and 95, its nearest tested neighbours,
+were both back to ordinary). **A finer sweep proved that reading wrong** — `--burst-iters` in
+`{70, 73, 76, 80, 83, 86, 90}`:
+
+| `burst_iters` | 70 | 73 | 76 | 80 | 83 | 86 | 90 |
+|---|---|---|---|---|---|---|---|
+| viol | 1.11 | 1.12 | 0.96 | 0.59 | 0.68 | 0.78 | 1.05 |
+| worst margin | 0.91x | 0.90x | **0.88x** | **0.88x** | **0.89x** | 0.96x | 0.99x |
+
+**76/80/83 cluster tightly at 0.88-0.89x** — a real, if narrow (~10 iterations), BASIN, not a
+single lucky iterate. The coarse sweep's 65 and 95 simply landed just outside its edges. Checked
+on the tape at a second point (burst 83, not just 80) to make sure the benefit is a property of
+the basin and not a fluke of one exact iteration count:
+
+| tape metric | shipped | burst 80 | burst 83 |
+|---|---|---|---|
+| design-envelope overshoot | +0.79 N.m / 0.44% | +0.27 N.m / 0.29% | +0.41 N.m / 0.29% |
+| hardware-envelope overshoot | +0.51 N.m | +0.01 N.m | +0.12 N.m |
+| flat-peak clearance | 0.48 N.m | 0.71 N.m | 0.66 N.m |
+| flight AM peak-to-peak | 1.34e-3 | 1.50e-3 | 1.46e-3 |
+
+Consistent at both points: substantially better torque-envelope compliance, a smaller and
+consistent momentum trade-off. **K15 stands as a real win**, with the caveat sharpened rather
+than removed: it is real at `--w-vrate 0.1` combined with `--burst-iters` in roughly 76-83, from
+this one seed — narrower than a Part-I-grade "six independent chains" reproducibility bar, and
+"pick almost exactly the right iteration count" is still a fragile thing to depend on. The
+right framing is not "ship `burst_0.npy`" but "the objective genuinely has a better basin near
+here, and the tool for finding it (short, independent, fine-grained burst-length screens) is now
+established" — the next session's job is to widen that bar: try another seed, and see whether a
+`--restarts` search using `--burst-iters` INSIDE this basin (say 80) reliably lands there instead
+of wandering past it, unlike the 300-iteration chain in M27.

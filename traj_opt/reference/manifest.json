@@ -1,25 +1,176 @@
 {
-  "source_checkpoint": "traj_opt/out/cand/t3_b0.npy",
-  "commit": "2423f46b0a8ec040aca8290f00590911e70575b9",
-  "flight_knots": 50,
-  "max_violation": 0.579661,
-  "flight_amom": 1e-06,
-  "checks_passed": 11,
-  "checks_failed": 0,
-  "worst_overrun": 0.9835,
-  "failed": [],
-  "margins": {
-    "quaternion stays unit without being pinned": 0.0182,
-    "net rotation is one full backflip": 0.0,
-    "flight CoM is ballistic": 0.0027,
-    "flight angular momentum conserved": 0.9835,
-    "contact forces inside the friction cone": 0.0,
-    "torques inside the enforced torque-speed halfplanes": 0.0,
-    "no geometry below the floor": 0.0147,
-    "non-foot geometry keeps its clearance margin": 0.105,
-    "sagittal symmetry holds without being pinned": 0.1,
-    "flight is genuinely tucked": 0.8847,
-    "collocation matches a tight integrator": 0.7097
+  "commit": "1c710c7d31af14c731dccf4c2deef82292987949",
+  "note": "First reference from the sagittal CasADi formulation: cold start, exact Hessians, IPOPT Solve_Succeeded.",
+  "hz": 500.0,
+  "config": {
+    "phases": [
+      {
+        "name": "load",
+        "contacts": [
+          "front",
+          "rear"
+        ],
+        "n": 16,
+        "T_lo": 0.1,
+        "T_hi": 0.6,
+        "T0": 0.3
+      },
+      {
+        "name": "launch",
+        "contacts": [
+          "rear"
+        ],
+        "n": 16,
+        "T_lo": 0.08,
+        "T_hi": 0.4,
+        "T0": 0.18
+      },
+      {
+        "name": "flight",
+        "contacts": [],
+        "n": 30,
+        "T_lo": 0.3,
+        "T_hi": 0.8,
+        "T0": 0.5
+      },
+      {
+        "name": "absorb",
+        "contacts": [
+          "front",
+          "rear"
+        ],
+        "n": 24,
+        "T_lo": 0.15,
+        "T_hi": 0.8,
+        "T0": 0.4
+      }
+    ],
+    "mu": 0.6,
+    "torque_sf": 0.9,
+    "speed_sf": 0.9,
+    "body_clearance": 0.03,
+    "foot_clearance": 0.02,
+    "clear_ramp": 0.2,
+    "joint_inset": 0.02,
+    "x_land": 0.15,
+    "alpha": 20.0,
+    "rotation": -6.283185307179586,
+    "w_u": 1.0,
+    "w_du": 0.002,
+    "w_a": 1e-05,
+    "w_impulse": 0.001,
+    "w_dlam": 0.001,
+    "ipopt": {}
   },
-  "note": "First 11/11 in the project's history. nlp_scaling_max_gradient=1 (IPOPT's default scaling was putting every burst into restoration on iteration 2) plus the new --flight-amom, which asserts the angular-momentum invariant the true dynamics conserve exactly. Better than the outgoing trajectory on every audit check AND on the 500 Hz tape: torque overshoot +0.79 N.m on 0.44% of samples against +2.33 on 2.60%, tape momentum peak-to-peak 1.34e-3 against 3.39e-3, tuck I_yy 0.487 against 0.509. Hardware clearance 0.479 N.m against 0.481, i.e. unchanged."
+  "ipopt": {
+    "status": "Solve_Succeeded",
+    "iterations": 55,
+    "cost": 0.6227264021509823,
+    "max_violation": 9.999348214891068e-09
+  },
+  "phases": {
+    "load": 0.5333245336361305,
+    "launch": 0.2779637195356029,
+    "flight": 0.40739688124089285,
+    "absorb": 0.6638556783990578
+  },
+  "audit": {
+    "net rotation is one backflip": {
+      "value": 2.1056466703583965e-07,
+      "limit": 0.001,
+      "unit": "rad"
+    },
+    "starts at HOME at rest": {
+      "value": 2.592522173782792e-25,
+      "limit": 1e-06,
+      "unit": ""
+    },
+    "ends at HOME legs, at rest": {
+      "value": 0.00020975357232746238,
+      "limit": 0.02,
+      "unit": "rad, rad/s"
+    },
+    "tape satisfies MuJoCo inverse dynamics": {
+      "value": 0.260793399019704,
+      "limit": 0.5,
+      "unit": "N, N.m"
+    },
+    "torque inside the DESIGN torque-speed envelope": {
+      "value": -4.37774991550144,
+      "limit": 0.05,
+      "unit": "N.m over"
+    },
+    "torque inside the HARDWARE torque-speed envelope": {
+      "value": -5.772552864702604,
+      "limit": 0.0,
+      "unit": "N.m over"
+    },
+    "joint speed limits": {
+      "value": 0.8960986996618866,
+      "limit": 1.0,
+      "unit": "of max"
+    },
+    "joint position limits": {
+      "value": -0.019435242360557048,
+      "limit": 1e-06,
+      "unit": "rad over"
+    },
+    "ground force unilateral": {
+      "value": 0.0,
+      "limit": 0.5,
+      "unit": "N"
+    },
+    "ground force inside friction cone": {
+      "value": 0.3782125174101516,
+      "limit": 0.5,
+      "unit": "N over"
+    },
+    "stance feet on the floor": {
+      "value": 4.441540746748934e-05,
+      "limit": 0.001,
+      "unit": "m"
+    },
+    "stance feet roll without slipping": {
+      "value": 3.160172497798652e-05,
+      "limit": 0.001,
+      "unit": "m"
+    },
+    "swing feet above the floor": {
+      "value": 1.0683884332014781e-05,
+      "limit": 0.0001,
+      "unit": "m below"
+    },
+    "non-foot geometry keeps 20 mm off the floor": {
+      "value": 0.0,
+      "limit": 0.001,
+      "unit": "m short"
+    },
+    "flight CoM is ballistic": {
+      "value": 1.3925063718036938e-06,
+      "limit": 0.001,
+      "unit": "rel. error in g"
+    },
+    "flight angular momentum conserved": {
+      "value": 3.6508780095978466e-05,
+      "limit": 0.001,
+      "unit": "N.m.s p-p"
+    },
+    "phases re-integrate under a tight integrator": {
+      "value": 0.0003906358203749072,
+      "limit": 0.005,
+      "unit": "rad, m"
+    }
+  },
+  "closed_loop": {
+    "rotation_deg": -361.39237347349007,
+    "final_tilt_deg": 1.393084718384761,
+    "final_height": 0.27540069920690685,
+    "final_legs_err": 0.0405697672582116,
+    "apex": 0.6032908844554519,
+    "lateral_drift": 0.0016465173243442996,
+    "track_err_max": 0.2742048576335051,
+    "saturated_frac": 0.016985138004246284,
+    "bad_contact": [],
+    "landed": true
+  }
 }
