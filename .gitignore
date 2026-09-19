@@ -4,3 +4,4 @@ __pycache__/
 traj_opt/out/
 .claude
 MUJOCO_LOG.TXT
+.ruff_cache
