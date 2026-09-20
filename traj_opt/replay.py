@@ -1,4 +1,4 @@
-"""Play traj_opt/out/backflip.npz in meshcat.
+"""Play a backflip npz (default: the shipped reference) in meshcat.
 
     uv run traj_opt/replay.py [--fps 500] [--npz PATH]
     uv run traj_opt/replay.py --live [--speed 0.25] [--loops 3]
@@ -31,7 +31,7 @@ from pydrake.systems.framework import DiagramBuilder
 
 from go2_backflip import constants as K
 
-NPZ = Path(__file__).resolve().parent / "out" / "backflip.npz"
+NPZ = Path(__file__).resolve().parent / "reference" / "backflip.npz"
 
 
 def main() -> None:

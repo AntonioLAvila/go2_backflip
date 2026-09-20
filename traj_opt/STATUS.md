@@ -65,15 +65,41 @@ absorb phase, i.e. the feedback controller's job, not the reference's.
 * The landing is scheduled as a simultaneous four-foot touchdown. A rear-first or front-first
   landing may absorb more gently; with 40 s solves this is now cheap to explore — add a phase to
   `Config.phases`.
-* `DAMPING` in `constants.py` (0.1, "guess") is unused; the model reads `go2.xml`'s 0.05. Real
-  joint friction is unmodelled and is a sim-to-real item for the RL stage's domain randomisation.
+* Real joint dry friction is unmodelled (the model reads `go2.xml`'s 0.05 viscous damping only);
+  the RL stage randomises it (`joint_friction` 0-0.3 N·m, damping ×0.4-2).
 * Out-of-plane stability is untested beyond the 1.6 mm drift and a 100 N shove: the reference is
   exactly sagittal, so roll/yaw are regulated only by the hip PD. RL should randomise there.
 
 ## Hand-off
 
 * RL (mjlab tracking task): `traj_opt/reference/backflip_mjlab.npz`, 50 fps, 0.5 s standing hold
-  before and 1.0 s after; extras `ctrl_ff`, `contact`, `grf`, `phase`. mjlab ships no Go2 tracking
-  config — one has to be written against `go2_mjcf/go2.xml` (anchor body `base`).
+  before and 1.0 s after; extras `ctrl_ff`, `contact`, `grf`, `phase`. The mjlab environment now
+  exists: `src/go2_backflip/rl/`, tasks `Mjlab-Tracking-Flat-Unitree-Go2-Backflip[-State-Estimation]`
+  (see CLAUDE.md, "Stage 2"). Not trained yet.
 * Deterministic: `tools/mj_track.py` *is* a working baseline controller (kp 60, kd 2 + `ctrl`).
   The natural upgrade is TVLQR about the tape using `sagittal.py`'s exact derivatives.
+
+## RL stage (2026-09-19)
+
+Environment built and checked, no training run yet. `tools/rl_env_check.py --replay` drives the
+env with a zero policy (the action is a residual on the reference, so zero = the mj_track
+controller, but held at 50 Hz through mjlab's DcMotor actuators, delay buffers and mujoco_warp):
+
+| | mj_track, 500 Hz | mjlab env, 50 Hz hold |
+|---|---|---|
+| rotation / final tilt / height | −361.4° / 1.4° / 0.275 m | −360.8° / 0.9° / 0.276 m |
+| lands | yes | yes (all 8 envs, also under 0.2 white action noise; 0.3 breaks the landing) |
+| clean | yes | no: `head_sphere` hits the floor for 2 steps at touchdown (~3 kN peak in the contact sensor) |
+
+The head strike is marginal, not an env bug: the same trajectory in plain MuJoCo grazes or not
+depending on 2 ms of latency (STATUS "54 % clean" above), and solver iterations / a 1 ms physics
+step do not change it. A pyramidal friction cone does break the launch, so `cone="elliptic",
+impratio=100` (go2.xml's option block) is load-bearing in the env config. Global position error
+after landing is ~0.23 m (the robot lands short of the reference's `x_land`); the flip itself
+tracks to 1-7 cm mean body error.
+
+Open for training: the stock tracking terminations (`anchor_ori` 0.8, `ee_body_pos` 0.25 m) are
+what end noisy replays at touchdown -- expect them to dominate early `Episode_Termination` and
+loosen if they do; the adaptive frame sampler has only 4 bins on a 3.4 s clip. Deployment note:
+mjlab's ONNX metadata does not carry kp/kd (the DcMotor `<motor>` has gain 1), `ctrl_ff`, or the
+reference offset -- the hardware stage reads those from `go2_robot.py` and the npz.

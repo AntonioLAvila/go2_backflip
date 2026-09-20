@@ -4,11 +4,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-Stage 1 of a three-stage pipeline: **trajectory optimization → mjlab RL imitation (or a
-deterministic tracking controller) → Unitree Go2 hardware**. This repo produces a dynamically
-feasible backflip reference for the Go2 — `t, qpos, qvel, qacc, ctrl`, the contact schedule and
-the planned ground forces — plus the shared MJCF model, the constants both later stages depend
-on, and the checks that prove the reference against MuJoCo. Nothing downstream lives here yet.
+Stages 1 and 2 of a three-stage pipeline: **trajectory optimization → mjlab RL imitation (or a
+deterministic tracking controller) → Unitree Go2 hardware**. Stage 1 (`traj_opt/`, `tools/`)
+produces a dynamically feasible backflip reference for the Go2 — `t, qpos, qvel, qacc, ctrl`, the
+contact schedule and the planned ground forces — plus the shared MJCF model, the constants both
+later stages depend on, and the checks that prove the reference against MuJoCo. Stage 2
+(`src/go2_backflip/rl/`) is the mjlab motion-tracking environment that imitates it; it is built
+and checked but not yet trained. Nothing for hardware lives here yet.
 
 `traj_opt/STATUS.md` is the living log: current numbers, what was tried, what is open. Read it
 before assuming where things stand.
@@ -71,10 +73,18 @@ uv run traj_opt/mj_divergence.py --npz traj_opt/reference/backflip.npz
 uv run tools/tuck_box.py
 uv run tools/clearance_points.py
 uv run tools/check_envelope.py
+
+# Stage 2 (mjlab). The tasks are registered through the `mjlab.tasks` entry point in
+# pyproject.toml, so mjlab's own CLIs see them (after `uv sync` if the entry point changed).
+uv run list-envs
+uv run tools/rl_env_check.py                  # build the env, print managers, one zero-action step
+uv run tools/rl_env_check.py --replay [--view] [--action-noise 0.2]   # zero policy = mj_track's controller at 50 Hz; exit 0 iff it lands
+uv run play Mjlab-Tracking-Flat-Unitree-Go2-Backflip --agent zero --no-terminations --motion-file traj_opt/reference/backflip_mjlab.npz
+uv run train Mjlab-Tracking-Flat-Unitree-Go2-Backflip --env.scene.num-envs 4096 --agent.max-iterations 10000
 ```
 
-No unit-test suite exists; `verify_sagittal.py`, `validate.py` and `mj_track.py` are the
-correctness checks, in that order of dependence.
+No unit-test suite exists; `verify_sagittal.py`, `validate.py`, `mj_track.py` and
+`rl_env_check.py --replay` are the correctness checks, in that order of dependence.
 
 `traj_opt/reference/` is tracked: `backflip.npz` (500 Hz, MuJoCo convention),
 `backflip_mjlab.npz` (the RL clip) and `manifest.json` (full `Config`, IPOPT status, every audit
@@ -168,3 +178,42 @@ inherits headroom. Use `torque_speed_halfplanes(peak)` for anything on a tape;
 
 Drake is no longer in the optimization path — only `replay.py` (meshcat) and
 `verify_parity.py` use it.
+
+## Stage 2: the mjlab environment (`src/go2_backflip/rl/`)
+
+mjlab's tracking task (`mjlab.tasks.tracking`, a BeyondMimic re-implementation) on the Go2, with
+the actuator driven the way a Unitree low-level command is: **PD position target + velocity
+target + feedforward torque at 50 Hz** (the DDS rate). mjlab ships no Go2, so everything
+robot-specific is here and reads `constants.py`:
+
+* **`go2_robot.py`** — the `EntityCfg`. `spec_fn` loads `go2.xml` and deletes its XML `<motor>`
+  actuators *and keyframes* (mjlab adds its own motors and `init_state` key; leaving the keys in
+  fails compile). Actuators are `DcMotorActuatorCfg` (kp 60, kd 2): the only mjlab actuator that
+  honours a feedforward torque, and its linear torque-speed clip is exactly the hardware envelope
+  once `saturation_effort = peak / (1 − CORNER_SPEED_FRAC)`. Armature/damping stay the XML's.
+  `soft_joint_pos_limit_factor` **must be 1.0** — the reference runs the calves to 0.02 rad from
+  the hard limit and any smaller factor clips it on reset and penalises it.
+* **`actions.py`** — `JointPositionFeedforwardAction`: position target `q_ref[t] + scale·action`
+  (a residual on the reference; zero action *is* the `mj_track` controller), plus `dq_ref[t]` and
+  `ctrl_ff[t]` from the npz, all through mjlab's shared command-delay buffer. Keep the term key
+  `"joint_pos"` and the `JointPositionAction` base: mjlab's ONNX export checks both. Frame
+  bookkeeping: after a reset the robot is at frame `s` while `time_steps` reads `s+1`, so
+  everything indexed at `time_steps` is the frame to reach by the end of the coming step.
+* **`mdp.py`** — `motion_finished` (a `time_out=True` truncation at the last frame; without it
+  the command wraps and teleports mid-episode), `gravity_offset` (gravity DR emulated as a
+  per-episode constant `m_b·Δg` wrench on every body, because mjlab cannot batch `opt.gravity`;
+  never add another wrench event on the robot, it would overwrite it), `reference_contact`.
+* **`env_cfg.py`** — the walking-policy-like actor (joint pos/vel, gyro, projected gravity, last
+  action: 5-frame history, noise, 0–1-step delay; plus the next reference frame and the base
+  orientation error; no base linear velocity / position error in the default task), all the DR
+  (`pseudo_inertia`, friction, joint friction/damping/armature, `pd_gains`, `effort_limits`,
+  encoder bias, gravity, velocity pushes, 0–6 ms command delay), physics 2 ms × decimation 10.
+  `cone="elliptic", impratio=100` is load-bearing: pyramidal breaks the launch.
+* **`tools/rl_env_check.py`** is the acceptance test for the env config, the analogue of
+  `mj_track.py`: the zero policy must land the reference through mjlab. "Landed" is the pass
+  criterion; "clean" is reported separately and is marginal at nominal (the head strikes the floor
+  at touchdown for two steps; 2 ms of latency decides it in plain MuJoCo as well).
+
+Deployment caveat: the exported ONNX metadata does not carry kp/kd, `ctrl_ff` or the reference
+offset. The hardware stage must take kp/kd from `go2_robot.py` and `q_ref`/`dq_ref`/`ctrl_ff` from
+the npz, indexed by the same frame counter as the policy.

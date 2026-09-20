@@ -18,7 +18,7 @@ import numpy as np
 
 from go2_backflip import constants as K
 
-NPZ = Path(__file__).resolve().parent / "out" / "backflip.npz"
+NPZ = Path(__file__).resolve().parent / "reference" / "backflip.npz"
 SCENE = str(Path(K.MODEL_PATH).parent / "scene.xml")
 
 

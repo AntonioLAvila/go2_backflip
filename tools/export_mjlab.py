@@ -10,9 +10,10 @@ the environment's control rate (50 Hz for mjlab's stock tracking config). Frames
 exact decimation of the 500 Hz tape, never re-interpolated.
 
 A standing hold is padded on both ends: a tracking episode ends with the clip, and a policy that
-never sees "and then stand still" does not learn to stick the landing. Carried along as extras,
-for feedforward / reward shaping / a contact-schedule observation: `ctrl_ff`, `contact`, `grf`,
-`phase`, `body_names`, `joint_names`.
+never sees "and then stand still" does not learn to stick the landing. Carried along as extras:
+`ctrl_ff`, `contact`, `grf`, `phase`, `body_names`, `joint_names`. The RL stage
+(`go2_backflip.rl`) reads `ctrl_ff` and `joint_names` for the feedforward torque and `contact`
+for a privileged critic observation, so those three are part of the contract.
 
     uv run tools/export_mjlab.py [--fps 50] [--pre-hold 0.5] [--hold 1.0]
 """
