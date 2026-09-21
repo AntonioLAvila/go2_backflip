@@ -32,5 +32,10 @@ def go2_backflip_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         save_interval=250,
         num_steps_per_env=24,
         max_iterations=10_000,
-        logger="tensorboard",
+        # mjlab defaults to wandb already; pinned here so the logger and its project are
+        # part of the task definition rather than a CLI flag. Entity comes from
+        # $WANDB_USERNAME (rsl_rl's WandbLogWriter reads that, not $WANDB_ENTITY);
+        # unset means your default entity.
+        logger="wandb",
+        wandb_project="go2-backflip",
     )
